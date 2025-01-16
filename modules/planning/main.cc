@@ -21,12 +21,15 @@
 #include "third_party/ros/include/ros/ros.h"
 
 int main(int argc, char **argv) {
+  // 初始化Google日志库。argv[0]通常是程序名称，这一行会为程序设置日志输出功能
   google::InitGoogleLogging(argv[0]);
+  // 解析命令行传入的参数，并将其存储在argc和argv中
   google::ParseCommandLineFlags(&argc, &argv, true);
 
   ros::init(argc, argv, "planning");
-
+  // 规划模块核心类，负责执行规划任务
   ::apollo::planning::PlanningNode planning_node;
+  // 启用规划节点
   planning_node.Run();
 
   return 0;

@@ -21,9 +21,9 @@
 #ifndef MODULES_ADAPTERS_ADAPTER_MANAGER_H_
 #define MODULES_ADAPTERS_ADAPTER_MANAGER_H_
 
-#include <functional>
-#include <memory>
-#include <type_traits>
+#include <functional>  // 提供函数对象、回调等功能
+#include <memory>     // 提供智能指针等内存管理功能
+#include <type_traits>  // 提供类型特性检查功能
 
 #include "modules/common/adapters/adapter.h"
 #include "modules/common/adapters/message_adapters.h"
@@ -123,11 +123,14 @@ namespace adapter {
  * \par
  * The AdapterManager is a singleton.
  */
+// AdapterManager类是一个单例类，负责管理所有的适配器，并提供初始化、访问和与适配器交互的API。
+// 可以通过REGISTER_ADAPTER宏来注册感兴趣的适配器
 class AdapterManager {
  public:
   /**
    * @brief Initialize the /class AdapterManager singleton.
    */
+  // 初始化AdapterManager单例
   static void Init();
 
   /**
@@ -137,6 +140,7 @@ class AdapterManager {
    * @param adapter_config_filename the path to the proto file that
    * contains the adapter manager configuration.
    */
+  // 通过指定的配置文件路径初始化AdapterManager
   static void Init(const std::string &adapter_config_filename);
 
   /**
@@ -144,7 +148,9 @@ class AdapterManager {
    * provided configuration.
    * @param configs the adapter manager configuration proto.
    */
+  // 通过传递的AdapterManagerConfig对象初始化AdapterManager
   static void Init(const AdapterManagerConfig &configs);
+  // 观察适配器的状态
   static void Observe();
 
   /**
@@ -152,6 +158,7 @@ class AdapterManager {
    * rate. It takes a class member function, and a bare pointer to the
    * object to call the method on.
    */
+  // 创建一个定时器，在指定的时间间隔内调用回调函数。回调函数可以是类的成员函数
   template <class T>
   static ros::Timer CreateTimer(ros::Duration period,
                                 void (T::*callback)(const ros::TimerEvent &),
@@ -167,13 +174,16 @@ class AdapterManager {
  private:
   /// The node handler of ROS, owned by the /class AdapterManager
   /// singleton.
+  // node_handle_是ROS节点句柄，AdapterManager单例持有它，用于与ROS进行交互
   std::unique_ptr<ros::NodeHandle> node_handle_;
 
   /// Observe() callbacks that will be used to to call the Observe()
   /// of enabled adapters.
+  // observers_是一个回调函数的集合，用于在观察过程中调用适配器的Observe方法
   std::vector<std::function<void()>> observers_;
 
   /// The following code registered all the adapters of interest.
+  // 通过REGISTER_ADAPTER宏注册多个适配器，使得它们可以在AdapterManager中使用
   REGISTER_ADAPTER(Chassis);
   REGISTER_ADAPTER(ChassisDetail);
   REGISTER_ADAPTER(ControlCommand);

@@ -34,17 +34,30 @@ PlanningNode::PlanningNode() {
 }
 
 PlanningNode::~PlanningNode() {}
-
+/// @brief 
 void PlanningNode::Run() {
-  static ros::Rate loop_rate(FLAGS_planning_loop_rate);
+  // 控制循环的频率
+  static ros::Rate loop_rate(FLAGS_planning_loop_rate);  // 5：每秒执行5次
   while (ros::ok()) {
+    // 每次循环时执行 RunOnce() 方法，处理一次规划任务
     RunOnce();
+    // 处理ROS消息回调，确保ROS节点能够正常与外部系统进行通信
     ros::spinOnce();
+    // 根据设定的频率计算出一个适当的休眠时间，使得每次循环的时间间隔为 1 / FLAGS_planning_loop_rate
     loop_rate.sleep();
   }
 }
 
+/*
+1.监听和更新外部数据（如定位、底盘数据等）。
+2.检查定位和底盘数据的有效性，如果数据无效则跳过当前周期。
+3.根据最新的定位和底盘信息进行路径规划。
+4.如果规划成功，将规划结果转换为适当的格式并发布。如果规划失败，则输出错误信息
+*/
+/// @brief 执行了一次完整的规划周期，涉及从不同的数据源获取信息、执行路径规划，并发布规划结果
 void PlanningNode::RunOnce() {
+  // 监听或更新与外部系统（如传感器、控制器等）的数据流。
+  //可能会在每次循环中检查传感器或其他数据的更新
   AdapterManager::Observe();
   if (AdapterManager::GetLocalization() == nullptr) {
     AERROR << "Localization is not available; skip the planning cycle";
@@ -67,26 +80,30 @@ void PlanningNode::RunOnce() {
   } else {
     AINFO << "Get localization message;";
   }
-
+  // 输出日志，表示规划过程开始
   AINFO << "Start planning ...";
-
+  // 获取最新的定位数据，并将其转换为 VehicleState（车辆状态）
   const auto& localization =
       AdapterManager::GetLocalization()->GetLatestObserved();
   VehicleState vehicle_state(localization);
-
+  // 获取最新的底盘数据，并检查车辆是否处于自动驾驶模式
   const auto& chassis = AdapterManager::GetChassis()->GetLatestObserved();
   bool is_on_auto_mode = chassis.driving_mode() == chassis.COMPLETE_AUTO_DRIVE;
-
+  // 规划周期: 0.2s
   double planning_cycle_time = 1.0 / FLAGS_planning_loop_rate;
   // the execution_start_time is the estimated time when the planned trajectory
   // will be executed by the controller.
+  // 预估执行时间，根据当前时间和规划周期时间计算得出的，它表示规划的轨迹将在多长时间后被控制器执行
   double execution_start_time =
       apollo::common::time::ToSecond(apollo::common::time::Clock::Now()) +
       planning_cycle_time;
-
+  // 存储规划生成的轨迹点
   std::vector<TrajectoryPoint> planning_trajectory;
+  // 生成规划轨迹
   bool res_planning = planning_.Plan(vehicle_state, is_on_auto_mode,
       execution_start_time, &planning_trajectory);
+  // 如果规划成功，则将规划结果转换为 TrajectoryPb（一个protobuf格式的轨迹消息），
+  //并通过 AdapterManager::PublishPlanningTrajectory() 发布该轨迹
   if (res_planning) {
     TrajectoryPb trajectory_pb = ToTrajectoryPb(execution_start_time, planning_trajectory);
     AdapterManager::PublishPlanningTrajectory(trajectory_pb);

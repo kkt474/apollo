@@ -30,22 +30,27 @@ using apollo::common::vehicle_state::VehicleState;
 RTKReplayPlanner::RTKReplayPlanner() {
   ReadTrajectoryFile(FLAGS_rtk_trajectory_filename);
 }
-
+/// @brief 生成基于 RTK 记录的离散化轨迹，确保轨迹的时间连续性并满足后续规划的需求
+/// @param start_point 在上一帧中找到当前规划的时间匹配点
+/// @param ptr_discretized_trajectory 
+/// @return 
 bool RTKReplayPlanner::Plan(
     const TrajectoryPoint& start_point,
     std::vector<TrajectoryPoint>* ptr_discretized_trajectory) {
-
+  // 检查RTK轨迹
   if (complete_rtk_trajectory_.empty() || complete_rtk_trajectory_.size() < 2) {
     AERROR << "RTKReplayPlanner doesn't have a recorded trajectory or "
               "the recorded trajectory doesn't have enough valid trajectory "
               "points.";
     return false;
   }
-
+  // 找到与给定起始点（start_point）最匹配的轨迹点在 complete_rtk_trajectory_ 中的位置
   std::size_t matched_index =
       QueryPositionMatchedPoint(start_point, complete_rtk_trajectory_);
 
-  std::size_t forward_buffer = FLAGS_rtk_trajectory_forward;
+  std::size_t forward_buffer = FLAGS_rtk_trajectory_forward;  // 800
+  // 计算轨迹的结束索引，确保不超出 complete_rtk_trajectory_ 的范围。
+  // 如果 matched_index + forward_buffer 超过了轨迹的长度，则 end_index 被设置为轨迹的最后一个点
   std::size_t end_index =
       matched_index + forward_buffer >= complete_rtk_trajectory_.size()
           ? complete_rtk_trajectory_.size() - 1
@@ -61,6 +66,8 @@ bool RTKReplayPlanner::Plan(
       complete_rtk_trajectory_.begin() + end_index + 1);
 
   // reset relative time
+  // 对轨迹进行时间重置：将所有轨迹点的 relative_time（相对时间）减去 matched_index 处的时间，
+  // 使得第一个轨迹点的时间为 0，以便后续规划使用
   double zero_time = complete_rtk_trajectory_[matched_index].relative_time;;
   for (std::size_t i = 0; i < ptr_discretized_trajectory->size(); ++i) {
     (*ptr_discretized_trajectory)[i].relative_time -= zero_time;
@@ -72,7 +79,7 @@ bool RTKReplayPlanner::Plan(
   while (ptr_discretized_trajectory->size() < FLAGS_rtk_trajectory_forward) {
     const auto& last_point = ptr_discretized_trajectory->back();
     ptr_discretized_trajectory->push_back(last_point);
-    ptr_discretized_trajectory->back().relative_time += FLAGS_trajectory_resolution;
+    ptr_discretized_trajectory->back().relative_time += FLAGS_trajectory_resolution; // 0.01
   }
   return true;
 }
@@ -126,7 +133,14 @@ void RTKReplayPlanner::ReadTrajectoryFile(const std::string& filename) {
 
   file_in.close();
 }
-
+/*
+1.遍历给定轨迹 trajectory 中的每个轨迹点，计算每个点与起始点 start_point 之间的平方距离。
+2.找到与起始点距离最小的轨迹点，并返回该点在轨迹中的索引
+*/
+/// @brief 从给定的轨迹中查找与给定起始点（start_point）最匹配的位置点。匹配标准是找到与起始点的距离最近的轨迹点
+/// @param start_point 用于匹配的起始轨迹点
+/// @param trajectory 需要查找的轨迹，类型为 std::vector<TrajectoryPoint>，包含了一系列轨迹点
+/// @return 
 std::size_t RTKReplayPlanner::QueryPositionMatchedPoint(
     const TrajectoryPoint& start_point,
     const std::vector<TrajectoryPoint>& trajectory) const {
