@@ -51,29 +51,38 @@ bool ReversePath::Init(
     AINFO << "ReversePath config: " << config_.DebugString();
     return true;
 }
-
+// 调用入口链路：PathGeneration::Execute() --> Task::Execute()保存上下文 --> ReversePath::Process()执行具体逻辑
 apollo::common::Status ReversePath::Process(Frame* frame, ReferenceLineInfo* reference_line_info) {
+    // 步骤1: 获取起始点SL状态
     GetStartPointSLState();
+    // 步骤2: 检查交叉口前置条件
     if (config_.is_considered_square_boundary()
         && reference_line_info->GetJunction(init_sl_state_.first[0], &junction_overlap_) == 0) {
         AERROR << "not in square junction";
         return Status::OK();
     }
+    // 步骤3: 计算参考线可回退长度
     PathBoundary path_boundary;
     PathData path_data;
     AINFO << init_sl_state_.first[0] << "," << init_sl_state_.first[1] << "," << init_sl_state_.second[0] << ","
           << init_sl_state_.second[1];
+    // 参考线路径的起始s值
     double reference_line_backward_s = reference_line_info->reference_line().GetMapPath().accumulated_s().front();
     static constexpr double kEpsilon = 0.1;
+    // 自车后方还有多长参考线可用
     double reference_line_backward_length = init_sl_state_.first[0] - reference_line_backward_s - kEpsilon;
+    // 步骤4: 决定路径边界
     if (!DecidePathBounds(&path_boundary, reference_line_backward_length)) {
         AERROR << "Decide path bound failed";
         return Status::OK();
     }
+    // 步骤5: osqp优化路径
     if (!OptimizePathOsqp(path_boundary, &path_data)) {
         AERROR << "Optimize path failed";
         return Status::OK();
     }
+    // 步骤6: 写入结果
+    // 将优化后的倒车路径写入 reference_line_info
     *reference_line_info->mutable_path_data() = path_data;
     // for (const auto& pt : path_data.discretized_path()) {
     //   AINFO << pt.x() << "," << pt.y() << "," << pt.s() << "," << pt.theta();
@@ -147,9 +156,9 @@ bool ReversePath::OptimizePath(PathBoundary* path_boundary, PathData* candidate_
 }
 
 bool ReversePath::OptimizePathOsqp(PathBoundary& path_boundary, PathData* candidate_path_data) {
-    const auto& config = config_.path_optimizer_config();
+    const auto& config = config_.path_optimizer_config();  // PiecewiseJerkPath配置
     const ReferenceLine& reference_line = reference_line_info_->reference_line();
-    std::array<double, 3> end_state = {0.0, 0.0, 0.0};
+    std::array<double, 3> end_state = {0.0, 0.0, 0.0};  // 终点状态: l=0, dl=0, ddl=0   
     size_t path_boundary_size = path_boundary.boundary().size();
     if (path_boundary_size <= 1U) {
         AERROR << "Get invalid path boundary with size: " << path_boundary_size;
@@ -158,11 +167,12 @@ bool ReversePath::OptimizePathOsqp(PathBoundary& path_boundary, PathData* candid
     std::vector<double> opt_l, opt_dl, opt_ddl;
     std::vector<std::pair<double, double>> ddl_bounds;
     PathOptimizerUtil::CalculateAccBound(path_boundary, reference_line, &ddl_bounds);
+    // 因为倒车时运动方向相反，曲率的正负号需要翻转
     std::for_each(ddl_bounds.begin(), ddl_bounds.end(),
         [](std::pair<double, double>& bound) {
               double temp = bound.first;
-              bound.first = -bound.second;
-              bound.second = -temp;
+              bound.first = -bound.second;  //  下界取反
+              bound.second = -temp;         // 上界取反
         });
     PrintCurves print_debug;
     for (size_t i = 0; i < path_boundary_size; ++i) {
@@ -171,13 +181,16 @@ bool ReversePath::OptimizePathOsqp(PathBoundary& path_boundary, PathData* candid
         print_debug.AddPoint("ref_kappa", s, kappa);
     }
     print_debug.PrintToLog();
+    // 估计jerk边界
     const double jerk_bound = PathOptimizerUtil::EstimateJerkBoundary(std::fmax(init_sl_state_.first[1], 1e-12));
+    // 初始化ref_l全为0(参考线中心)
     std::vector<double> ref_l(path_boundary_size, 0);
     std::vector<double> weight_ref_l(path_boundary_size, 0);
     PathOptimizerUtil::UpdatePathRefWithBound(path_boundary, config.path_reference_l_weight(), &ref_l, &weight_ref_l);
 
-    path_boundary.set_delta_s(0.1);
-    SLState reverse_init_sl_state = init_sl_state_;
+    path_boundary.set_delta_s(0.1);  // 转为正值，供QP优化器使用
+    SLState reverse_init_sl_state = init_sl_state_; 
+    // 倒车时，需要取反   
     reverse_init_sl_state.second[1] = -reverse_init_sl_state.second[1];
     reverse_init_sl_state.second[2] = -reverse_init_sl_state.second[2];
     bool res_opt = PathOptimizerUtil::OptimizePath(
@@ -200,9 +213,10 @@ bool ReversePath::OptimizePathOsqp(PathBoundary& path_boundary, PathData* candid
         for (auto& point : frenet_frame_path) {
             frenet_delta_s = point.s() - path_boundary.start_s();
             AINFO << point.dl() << "," << point.ddl();
-            point.set_s(path_boundary.start_s() - frenet_delta_s);
-            point.set_dl(-point.dl());
-            point.set_ddl(-point.ddl());
+            // QP 优化器输出的是正向（s 递增）的路径，需要将其反向映射回倒车方向
+            point.set_s(path_boundary.start_s() - frenet_delta_s);  // s反向
+            point.set_dl(-point.dl());  // dl反向
+            point.set_ddl(-point.ddl());  // ddl反向
             AINFO << point.dl() << "," << point.ddl();
         }
         PathData path_data;
@@ -226,22 +240,24 @@ bool ReversePath::GetBoundaryFromSquare(
         const ReferenceLineInfo& reference_line_info,
         PathBoundary* const path_boundary,
         const SLState& init_sl_state) {
+    // 从高精地图获取路口多边形junction_polygon
     const auto& hdmap = hdmap::HDMapUtil::BaseMapPtr();
     const auto& junction = hdmap->GetJunctionById(hdmap::MakeMapId(junction_overlap_.object_id));
     const auto& junction_polygon = junction->polygon();
+    // 将多边形投影到SL坐标系得到SLBoundary
     const auto& reference_line = reference_line_info.reference_line();
     SLBoundary sl_boundary;
     reference_line.GetSLBoundary(junction_polygon, &sl_boundary);
     SLPolygon sl_polygon(sl_boundary, junction_overlap_.object_id);
-
+    // 对于每个边界点，若s在路口范围内，用多边形的左右边界替换初始边界
     for (size_t i = 0; i < path_boundary->size(); i++) {
         auto& point = path_boundary->at(i);
         if (point.s < sl_polygon.MinS() || point.s > sl_polygon.MaxS()) {
             continue;
         }
-        double l_min = sl_polygon.GetRightBoundaryByS(point.s);
-        double l_max = sl_polygon.GetLeftBoundaryByS(point.s);
-        l_min = std::max<double>(l_min, -config_.max_lateral_distance());
+        double l_min = sl_polygon.GetRightBoundaryByS(point.s);  // 路口右边界
+        double l_max = sl_polygon.GetLeftBoundaryByS(point.s);   // 路口左边界
+        l_min = std::max<double>(l_min, -config_.max_lateral_distance()); //  不超过配置最大横向
         l_max = std::min<double>(l_max, config_.max_lateral_distance());
         if (point.l_lower.l > l_min) {
             point.l_lower.l = l_min;
@@ -262,9 +278,12 @@ bool ReversePath::InitPathBoundary(
     // Sanity checks.
     CHECK_NOTNULL(path_bound);
     path_bound->clear();
+    // delta_s为负，表示向s减小方向采样
     path_bound->set_delta_s(-0.1);
     double delta_s = path_bound->delta_s();
+    // 倒车终点s = 当前s - min(配置最大距离:10, 参考线可回退长度)
     double end_s = init_sl_state.first[0] - std::min(config_.max_s_distance(), reference_line_backward_length);
+    // 每个边界点初始横向范围[-max_lateral_distance, max_lateral_distance]
     for (double curr_s = init_sl_state.first[0]; curr_s > end_s; curr_s += delta_s) {
         path_bound->emplace_back(curr_s, -config_.max_lateral_distance(), config_.max_lateral_distance());
     }

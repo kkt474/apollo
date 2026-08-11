@@ -35,13 +35,19 @@ class RoutingComponent final
       const std::shared_ptr<routing::RoutingRequest>& request) override;
 
  private:
+// 发布实时路由响应到 /apollo/routing_response
   std::shared_ptr<::apollo::cyber::Writer<routing::RoutingResponse>>
       response_writer_ = nullptr;
+// 发布历史路由响应到 /apollo/routing_response_history
   std::shared_ptr<::apollo::cyber::Writer<routing::RoutingResponse>>
       response_history_writer_ = nullptr;
+// 核心路由逻辑对象（Navigator + 地图）
   Routing routing_;
+// 缓存最近一次路由结果
   std::shared_ptr<routing::RoutingResponse> response_ = nullptr;
+// 定时器，周期性重发历史响应
   std::unique_ptr<::apollo::cyber::Timer> timer_;
+// 保护 response_ 的线程安全
   std::mutex mutex_;
 };
 

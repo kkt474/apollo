@@ -47,6 +47,7 @@ namespace math {
 template <typename T>
 T lerp(const T &x0, const double t0, const T &x1, const double t1,
        const double t) {
+  // 两个点非常接近，直接返回第一个点
   if (std::abs(t1 - t0) <= 1.0e-6) {
     AERROR << "input time difference is too small";
     return x0;

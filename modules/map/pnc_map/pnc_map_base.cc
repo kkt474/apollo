@@ -50,8 +50,8 @@ double PncMapBase::LookForwardDistance(const double velocity) {
   auto forward_distance = velocity * FLAGS_look_forward_time_sec;
 
   return forward_distance > FLAGS_look_forward_short_distance
-             ? FLAGS_look_forward_long_distance
-             : FLAGS_look_forward_short_distance;
+             ? FLAGS_look_forward_long_distance   // 250
+             : FLAGS_look_forward_short_distance;  // 180
 }
 
 bool PncMapBase::IsNewPlanningCommand(

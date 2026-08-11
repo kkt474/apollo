@@ -121,12 +121,12 @@ Status LonController::Init(std::shared_ptr<DependencyInjector> injector) {
   double ts = lon_based_pidcontroller_conf_.ts();
   bool enable_leadlag =
       lon_based_pidcontroller_conf_.enable_reverse_leadlag_compensation();
-
+// 双环PID： 位置环 + 速度环
   station_pid_controller_.Init(
       lon_based_pidcontroller_conf_.station_pid_conf());
   speed_pid_controller_.Init(
       lon_based_pidcontroller_conf_.low_speed_pid_conf());
-
+// 超前滞后
   if (enable_leadlag) {
     station_leadlag_controller_.Init(
         lon_based_pidcontroller_conf_.reverse_station_leadlag_conf(), ts);
@@ -203,12 +203,14 @@ Status LonController::ComputeControlCommand(
     AERROR << error_msg;
     return Status(ErrorCode::CONTROL_COMPUTE_ERROR, error_msg);
   }
+  // compute longitudinal errors
   ComputeLongitudinalErrors(trajectory_analyzer_.get(), preview_time, ts,
                             debug);
 
   double station_error_limit =
       lon_based_pidcontroller_conf_.station_error_limit();
   double station_error_limited = 0.0;
+  // 位置误差限幅：如果启用预览，则对预览位置误差进行限幅，否则对当前位置误差进行限幅
   if (lon_based_pidcontroller_conf_.enable_speed_station_preview()) {
     station_error_limited =
         common::math::Clamp(debug->preview_station_error(),
@@ -261,7 +263,8 @@ Status LonController::ComputeControlCommand(
     speed_pid_controller_.SetPID(
         lon_based_pidcontroller_conf_.high_speed_pid_conf());
   }
-
+  
+  // 位置环
   double speed_offset =
       station_pid_controller_.Control(station_error_limited, ts);
   if (enable_leadlag) {
@@ -272,6 +275,7 @@ Status LonController::ComputeControlCommand(
   double speed_controller_input_limit =
       lon_based_pidcontroller_conf_.speed_controller_input_limit();
   double speed_controller_input_limited = 0.0;
+  // 速度环输入：如果启用预览，则输入为speed_offset + 预览速度误差，否则为speed_offset + 当前速度误差
   if (lon_based_pidcontroller_conf_.enable_speed_station_preview()) {
     speed_controller_input = speed_offset + debug->preview_speed_error();
   } else {
@@ -282,7 +286,8 @@ Status LonController::ComputeControlCommand(
                           speed_controller_input_limit);
 
   double acceleration_cmd_closeloop = 0.0;
-
+  
+  // 速度环
   acceleration_cmd_closeloop =
       speed_pid_controller_.Control(speed_controller_input_limited, ts);
   debug->set_pid_saturation_status(
@@ -632,9 +637,10 @@ void LonController::ComputeLongitudinalErrors(
   double d_dot_matched = 0.0;
 
   auto vehicle_state = injector_->vehicle_state();
+  // 空间精匹配  匹配点：在轨迹上找到距离车辆最近的路径点match_point
   auto matched_point = trajectory_analyzer->QueryMatchedPathPoint(
       vehicle_state->x(), vehicle_state->y());
-
+  // 将车辆状态投影到参考线的Frenet坐标系
   trajectory_analyzer->ToTrajectoryFrame(
       vehicle_state->x(), vehicle_state->y(), vehicle_state->heading(),
       vehicle_state->linear_velocity(), matched_point, &s_matched,
@@ -643,10 +649,12 @@ void LonController::ComputeLongitudinalErrors(
   // double current_control_time = Time::Now().ToSecond();
   double current_control_time = ::apollo::cyber::Clock::NowInSeconds();
   double preview_control_time = current_control_time + preview_time;
-
+  
+  // 时间匹配 当前时刻轨迹上的最近点
   TrajectoryPoint reference_point =
       trajectory_analyzer->QueryNearestPointByAbsoluteTime(
           current_control_time);
+  // 时间匹配 当前时刻 + preview_time后的轨迹点
   TrajectoryPoint preview_point =
       trajectory_analyzer->QueryNearestPointByAbsoluteTime(
           preview_control_time);
@@ -667,7 +675,7 @@ void LonController::ComputeLongitudinalErrors(
   ADEBUG << "matched point:" << matched_point.DebugString();
   ADEBUG << "reference point:" << reference_point.DebugString();
   ADEBUG << "preview point:" << preview_point.DebugString();
-
+  // 航向误差修正
   double heading_error = common::math::NormalizeAngle(vehicle_state->heading() -
                                                       matched_point.theta());
   double lon_speed = vehicle_state->linear_velocity() * std::cos(heading_error);
@@ -679,7 +687,8 @@ void LonController::ComputeLongitudinalErrors(
 
   debug->set_station_reference(reference_point.path_point().s());
   debug->set_current_station(s_matched);
-  debug->set_station_error(reference_point.path_point().s() - s_matched);
+  // 误差计算
+  debug->set_station_error(reference_point.path_point().s() - s_matched); // 参考 - 实际
   debug->set_speed_reference(reference_point.v());
   debug->set_current_speed(lon_speed);
   debug->set_speed_error(reference_point.v() - s_dot_matched);

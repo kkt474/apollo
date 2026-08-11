@@ -1,0 +1,904 @@
+{
+  "module": "planning",
+  "version": "Apollo 11",
+  "architecture_pattern": "Planner->Scenario->Stage->Task",
+  "overview": {
+    "description": "Apollo自动驾驶规划模块，负责根据感知、定位、路由等输入计算安全高效的行驶轨迹",
+    "planning_frequency_hz": 10,
+    "default_planner": "PublicRoadPlanner",
+    "default_scenario": "LANE_FOLLOW"
+  },
+
+  "sub_modules": [
+    {
+      "name": "planning_component",
+      "path": "modules/planning/planning_component",
+      "description": "CyberRT组件层，规划模块的入口点",
+      "core_classes": [
+        {
+          "name": "PlanningComponent",
+          "file": "planning_component.h",
+          "base_class": "cyber::Component<PredictionObstacles, Chassis, LocalizationEstimate>",
+          "description": "CyberRT组件入口，订阅3个主话题+6个辅助话题，发布轨迹",
+          "key_methods": ["Init()", "Proc()"],
+          "subscribers": [
+            {"topic_type": "PredictionObstacles", "source": "Prediction模块", "role": "主输入-障碍物预测"},
+            {"topic_type": "Chassis", "source": "CAN总线", "role": "主输入-底盘状态"},
+            {"topic_type": "LocalizationEstimate", "source": "Localization模块", "role": "主输入-定位"},
+            {"topic_type": "TrafficLightDetection", "source": "Perception模块", "role": "红绿灯检测"},
+            {"topic_type": "PadMessage", "source": "人机交互", "role": "驾驶员指令"},
+            {"topic_type": "PlanningCommand", "source": "外部系统", "role": "规划命令"},
+            {"topic_type": "Stories", "source": "Storytelling模块", "role": "场景故事"},
+            {"topic_type": "ControlInteractiveMsg", "source": "Control模块", "role": "控制交互"},
+            {"topic_type": "MapMsg", "source": "相对地图", "role": "仅导航模式"}
+          ],
+          "publishers": [
+            {"topic_type": "ADCTrajectory", "target": "Control模块", "role": "主输出-规划轨迹"},
+            {"topic_type": "CommandStatus", "target": "外部系统", "role": "命令状态反馈"},
+            {"topic_type": "PlanningLearningData", "target": "学习系统", "role": "学习数据"},
+            {"topic_type": "RoutingRequest", "target": "Routing模块", "role": "重路由请求"}
+          ]
+        },
+        {
+          "name": "PlanningBase",
+          "file": "planning_base.h",
+          "description": "规划基类，定义RunOnce/Plan接口",
+          "key_methods": ["Init()", "RunOnce()", "Plan()", "IsPlanningFinished()"],
+          "members": ["planner_", "frame_", "traffic_decider_", "injector_", "last_publishable_trajectory_"]
+        },
+        {
+          "name": "OnLanePlanning",
+          "file": "on_lane_planning.h",
+          "base_class": "PlanningBase",
+          "description": "基于车道线的规划模式(主要模式)，依赖HDMap",
+          "key_methods": ["RunOnce()", "Plan()", "InitFrame()"],
+          "members": ["reference_line_provider_", "planning_smoother_"]
+        },
+        {
+          "name": "NaviPlanning",
+          "file": "navi_planning.h",
+          "base_class": "PlanningBase",
+          "description": "导航模式规划，不依赖HDMap",
+          "key_methods": ["RunOnce()", "Plan()", "ProcessPadMsg()"],
+          "members": ["reference_line_provider_", "target_lane_id_"]
+        }
+      ]
+    },
+    {
+      "name": "planning_base",
+      "path": "modules/planning/planning_base",
+      "description": "规划基础设施层，提供核心数据结构和算法",
+      "sub_directories": [
+        {
+          "name": "common",
+          "description": "核心数据结构(61个文件)",
+          "core_classes": [
+            {"name": "Frame", "file": "common/frame.h", "description": "规划帧，一帧规划的所有数据(参考线/障碍物/车辆状态)"},
+            {"name": "ReferenceLineInfo", "file": "common/reference_line_info.h", "description": "参考线信息，一条参考线的所有规划数据(路径/速度/决策/代价)"},
+            {"name": "Obstacle", "file": "common/obstacle.h", "description": "障碍物，包含感知和预测信息"},
+            {"name": "PathDecision", "file": "common/path_decision.h", "description": "路径决策，对障碍物的nudge/overtake/stop决策"},
+            {"name": "EgoInfo", "file": "common/ego_info.h", "description": "自车信息(位置/速度/边界框)"},
+            {"name": "LocalView", "file": "common/local_view.h", "description": "输入数据结构(9个shared_ptr)"},
+            {"name": "DependencyInjector", "file": "common/dependency_injector.h", "description": "依赖注入器(PlanningContext/FrameHistory/History/EgoInfo/VehicleState/LearningData)"},
+            {"name": "PlanningContext", "file": "common/planning_context.h", "description": "跨帧规划状态(重路由/借道/换道等)"},
+            {"name": "TrajectoryStitcher", "file": "common/trajectory_stitcher.h", "description": "轨迹缝合器，连接历史轨迹与新规划"},
+            {"name": "SpeedLimit", "file": "common/speed_limit.h", "description": "速度限制曲线"},
+            {"name": "StGraphData", "file": "common/st_graph_data.h", "description": "ST图数据"},
+            {"name": "DecisionData", "file": "common/decision_data.h", "description": "决策数据"},
+            {"name": "SLPolygon", "file": "common/sl_polygon.h", "description": "SL多边形，障碍物在SL坐标系的表示"}
+          ]
+        },
+        {
+          "name": "common/path",
+          "description": "路径数据结构",
+          "classes": ["DiscretizedPath", "FrenetFramePath", "PathData", "PathBoundary"]
+        },
+        {
+          "name": "common/speed",
+          "description": "速度数据结构",
+          "classes": ["SpeedData", "STBoundary", "STPoint"]
+        },
+        {
+          "name": "common/trajectory",
+          "description": "轨迹数据结构",
+          "classes": ["DiscretizedTrajectory", "PublishableTrajectory"]
+        },
+        {
+          "name": "common/trajectory1d",
+          "description": "一维轨迹",
+          "classes": ["ConstantDecelerationTrajectory1d", "ConstantJerkTrajectory1d", "PiecewiseAccelerationTrajectory1d", "PiecewiseJerkTrajectory1d", "PiecewiseTrajectory1d", "StandingStillTrajectory1d"]
+        },
+        {
+          "name": "reference_line",
+          "description": "参考线生成与平滑(20个文件)",
+          "core_classes": [
+            {"name": "ReferenceLineProvider", "file": "reference_line/reference_line_provider.h", "description": "参考线提供者(从路由获取参考线)"},
+            {"name": "ReferenceLine", "file": "reference_line/reference_line.h", "description": "参考线类(车道中心线+平滑)"},
+            {"name": "DiscretePointsReferenceLineSmoother", "description": "离散点参考线平滑器"},
+            {"name": "QpSplineReferenceLineSmoother", "description": "QP样条参考线平滑器"},
+            {"name": "SpiralReferenceLineSmoother", "description": "螺旋线参考线平滑器"}
+          ]
+        },
+        {
+          "name": "proto",
+          "description": "Protobuf定义(14个)",
+          "files": ["planning_config.proto", "planning_status.proto", "learning_data.proto", "reference_line_smoother_config.proto", "piecewise_jerk_path_config.proto", "lattice_structure.proto", "planning_semantic_map_config.proto", "auto_tuning_model_input.proto", "auto_tuning_raw_feature.proto", "st_drivable_boundary.proto", "ipopt_return_status.proto", "plugin_declare_info.proto"]
+        },
+        {
+          "name": "math",
+          "description": "数学工具",
+          "sub_dirs": ["constraint_checker", "curve1d", "discretized_points_smoothing", "piecewise_jerk", "smoothing_spline"],
+          "core_classes": ["CurveMath", "DiscretePointsMath", "PolynomialXd"]
+        },
+        {
+          "name": "gflags",
+          "description": "规划配置标志",
+          "files": ["planning_gflags.h(10.2KB)", "planning_gflags.cc(25.1KB)"]
+        },
+        {
+          "name": "learning_based",
+          "description": "学习模式数据",
+          "files": ["birdview_img_feature_renderer相关"]
+        }
+      ]
+    },
+    {
+      "name": "planners",
+      "path": "modules/planning/planners",
+      "description": "规划器层",
+      "planners": [
+        {
+          "name": "PublicRoadPlanner",
+          "path": "planners/public_road",
+          "type": "PlannerWithReferenceLine",
+          "is_default": true,
+          "description": "公开道路规划器(主力)，基于Scenario架构",
+          "core_classes": [
+            {"name": "PublicRoadPlanner", "key_methods": ["Init()", "Plan()"]},
+            {"name": "ScenarioManager", "key_methods": ["Init()", "Update()", "Reset()"]}
+          ]
+        },
+        {
+          "name": "LatticePlanner",
+          "path": "planners/lattice",
+          "type": "PlannerWithReferenceLine",
+          "is_default": false,
+          "description": "格子规划器，基于采样+评估的方法",
+          "sub_dirs": ["behavior", "trajectory_generation"]
+        },
+        {
+          "name": "NaviPlanner",
+          "path": "planners/navi",
+          "type": "PlannerWithReferenceLine",
+          "is_default": false,
+          "description": "导航规划器"
+        },
+        {
+          "name": "RTKPlanner",
+          "path": "planners/rtk",
+          "type": "Planner",
+          "is_default": false,
+          "description": "录制回放规划器"
+        }
+      ]
+    },
+    {
+      "name": "scenarios",
+      "path": "modules/planning/scenarios",
+      "description": "场景层，19种驾驶场景",
+      "scenarios": [
+        {
+          "name": "lane_follow",
+          "is_default": true,
+          "description": "车道跟随(默认场景)",
+          "stages": [
+            {
+              "name": "LANE_FOLLOW_STAGE",
+              "type": "LaneFollowStage",
+              "enabled": true,
+              "tasks": ["LaneChangePath", "LaneFollowPath", "LaneBorrowPath", "FallbackPath", "PathDecider", "RuleBasedStopDecider", "SpeedBoundsDecider(priori)", "PathTimeHeuristicOptimizer", "SpeedDecider", "SpeedBoundsDecider(final)", "PiecewiseJerkSpeedOptimizer"]
+            }
+          ]
+        },
+        {
+          "name": "bare_intersection_unprotected",
+          "description": "无保护交叉口",
+          "stages": [
+            {
+              "name": "BARE_INTERSECTION_UNPROTECTED_APPROACH",
+              "type": "BareIntersectionUnprotectedStageApproach",
+              "enabled": true,
+              "tasks": ["LaneFollowPath", "LaneBorrowPath", "FallbackPath", "PathDecider", "RuleBasedStopDecider", "SpeedBoundsDecider(priori)", "PathTimeHeuristicOptimizer", "SpeedDecider", "SpeedBoundsDecider(final)", "PiecewiseJerkSpeedOptimizer"]
+            },
+            {
+              "name": "BARE_INTERSECTION_UNPROTECTED_INTERSECTION_CRUISE",
+              "type": "BareIntersectionUnprotectedStageIntersectionCruise",
+              "enabled": true,
+              "tasks": ["LaneFollowPath", "LaneBorrowPath", "FallbackPath", "PathDecider", "RuleBasedStopDecider", "SpeedBoundsDecider(priori)", "PathTimeHeuristicOptimizer", "SpeedDecider", "SpeedBoundsDecider(final)", "PiecewiseJerkSpeedOptimizer"]
+            }
+          ]
+        },
+        {
+          "name": "emergency_pull_over",
+          "description": "紧急靠边",
+          "stages": [
+            {
+              "name": "EMERGENCY_PULL_OVER_SLOW_DOWN",
+              "type": "EmergencyPullOverStageSlowDown",
+              "enabled": true,
+              "tasks": ["LaneFollowPath", "LaneBorrowPath", "FallbackPath", "PathDecider", "RuleBasedStopDecider", "SpeedBoundsDecider(priori)", "PathTimeHeuristicOptimizer", "SpeedDecider", "SpeedBoundsDecider(final)", "PiecewiseJerkSpeedOptimizer"]
+            },
+            {
+              "name": "EMERGENCY_PULL_OVER_APPROACH",
+              "type": "EmergencyPullOverStageApproach",
+              "enabled": true,
+              "tasks": ["PullOverPath", "LaneFollowPath", "FallbackPath", "PathDecider", "RuleBasedStopDecider", "SpeedBoundsDecider(priori)", "PathTimeHeuristicOptimizer", "SpeedDecider", "SpeedBoundsDecider(final)", "PiecewiseJerkSpeedOptimizer"]
+            },
+            {
+              "name": "EMERGENCY_PULL_OVER_STANDBY",
+              "type": "EmergencyPullOverStageStandby",
+              "enabled": true,
+              "tasks": ["LaneFollowPath", "LaneBorrowPath", "FallbackPath", "PathDecider", "RuleBasedStopDecider", "SpeedBoundsDecider(priori)", "PathTimeHeuristicOptimizer", "SpeedDecider", "SpeedBoundsDecider(final)", "PiecewiseJerkSpeedOptimizer"]
+            }
+          ]
+        },
+        {
+          "name": "emergency_stop",
+          "description": "紧急停车",
+          "stages": [
+            {
+              "name": "EMERGENCY_STOP_APPROACH",
+              "type": "EmergencyStopStageApproach",
+              "enabled": true,
+              "tasks": ["LaneFollowPath", "FallbackPath", "PathDecider", "RuleBasedStopDecider", "SpeedBoundsDecider(priori)", "PathTimeHeuristicOptimizer", "SpeedDecider", "SpeedBoundsDecider(final)", "PiecewiseJerkSpeedOptimizer"]
+            },
+            {
+              "name": "EMERGENCY_STOP_STANDBY",
+              "type": "EmergencyStopStageStandby",
+              "enabled": true,
+              "tasks": ["LaneFollowPath", "LaneBorrowPath", "FallbackPath", "PathDecider", "RuleBasedStopDecider", "SpeedBoundsDecider(priori)", "PathTimeHeuristicOptimizer", "SpeedDecider", "SpeedBoundsDecider(final)", "PiecewiseJerkSpeedOptimizer"]
+            }
+          ]
+        },
+        {
+          "name": "free_space",
+          "description": "自由空间(泊车)",
+          "stages": [
+            {
+              "name": "STAGE_FREE_SPACE",
+              "type": "StageFreeSpace",
+              "enabled": true,
+              "tasks": ["OpenSpaceTrajectoryProvider", "OpenSpaceTrajectoryPartition", "OpenSpaceFallbackDecider"]
+            }
+          ]
+        },
+        {
+          "name": "lane_escape",
+          "description": "车道逃离",
+          "stages": [
+            {
+              "name": "LANE_ESCAPE_STAGE",
+              "type": "LaneEscapeStage",
+              "enabled": true,
+              "tasks": ["从代码推断: 路径规划+速度规划任务链"]
+            }
+          ]
+        },
+        {
+          "name": "lane_follow_park",
+          "description": "车道跟随泊车",
+          "stages": [
+            {
+              "name": "LANE_FOLLOW_PARK_STAGE",
+              "type": "LaneFollowParkStage",
+              "enabled": true,
+              "tasks": ["从代码推断: 路径规划+速度规划任务链"]
+            }
+          ]
+        },
+        {
+          "name": "large_curvature",
+          "description": "大曲率场景",
+          "stages": [
+            {
+              "name": "LARGE_CURVATURE",
+              "type": "StageLargeCurvature",
+              "enabled": true,
+              "tasks": ["OpenSpaceReplanDecider", "OpenSpaceRoiDeciderPark", "OpenSpacePathPlanning", "OpenSpaceTrajectoryOptimizerPark", "OpenSpaceTrajectoryPostProcess", "OpenSpaceFallbackDeciderPark"]
+            }
+          ]
+        },
+        {
+          "name": "park_and_go",
+          "description": "靠边停车后起步",
+          "stages": [
+            {
+              "name": "PARK_AND_GO_CHECK",
+              "type": "ParkAndGoStageCheck",
+              "enabled": true,
+              "tasks": ["OpenSpaceRoiDecider", "OpenSpaceTrajectoryProvider", "OpenSpaceTrajectoryPartition", "OpenSpaceFallbackDecider"]
+            },
+            {
+              "name": "PARK_AND_GO_ADJUST",
+              "type": "ParkAndGoStageAdjust",
+              "enabled": true,
+              "tasks": ["OpenSpaceRoiDecider", "OpenSpaceTrajectoryProvider", "OpenSpaceTrajectoryPartition", "OpenSpaceFallbackDecider"]
+            },
+            {
+              "name": "PARK_AND_GO_PRE_CRUISE",
+              "type": "ParkAndGoStagePreCruise",
+              "enabled": true,
+              "tasks": ["OpenSpaceRoiDecider", "OpenSpaceTrajectoryProvider", "OpenSpaceTrajectoryPartition", "OpenSpaceFallbackDecider"]
+            },
+            {
+              "name": "PARK_AND_GO_CRUISE",
+              "type": "ParkAndGoStageCruise",
+              "enabled": true,
+              "tasks": ["LaneFollowPath", "LaneBorrowPath", "FallbackPath", "PathDecider", "RuleBasedStopDecider", "STBoundsDecider", "SpeedBoundsDecider(priori)", "PathTimeHeuristicOptimizer", "SpeedDecider", "SpeedBoundsDecider(final)", "PiecewiseJerkSpeedOptimizer", "RssDecider"]
+            }
+          ]
+        },
+        {
+          "name": "precise_parking",
+          "description": "精确泊车",
+          "stages": [
+            {
+              "name": "APPROACHING_PRECISE_PARKING",
+              "type": "StageApproachingPreciseParking",
+              "enabled": true,
+              "tasks": ["从代码推断: 靠近停车点任务链"]
+            },
+            {
+              "name": "ARRIVE_PARKING_SPOT",
+              "type": "StageArriveParkingSpot",
+              "enabled": true,
+              "tasks": ["从代码推断: 到达停车点任务链"]
+            },
+            {
+              "name": "PRECISE_PARKING",
+              "type": "StagePreciseParking",
+              "enabled": true,
+              "tasks": ["从代码推断: 精确泊入任务链"]
+            }
+          ]
+        },
+        {
+          "name": "pull_over",
+          "description": "靠边停车",
+          "stages": [
+            {
+              "name": "PULL_OVER_APPROACH",
+              "type": "PullOverStageApproach",
+              "enabled": true,
+              "tasks": ["PullOverPath", "LaneFollowPath", "FallbackPath", "PathDecider", "RuleBasedStopDecider", "SpeedBoundsDecider(priori)", "PathTimeHeuristicOptimizer", "SpeedDecider", "SpeedBoundsDecider(final)", "PiecewiseJerkSpeedOptimizer", "RssDecider"]
+            },
+            {
+              "name": "PULL_OVER_RETRY_APPROACH_PARKING",
+              "type": "PullOverStageRetryApproachParking",
+              "enabled": false,
+              "tasks": ["OpenSpacePreStopDecider", "PullOverPath", "LaneFollowPath", "PathDecider", "RuleBasedStopDecider", "STBoundsDecider", "SpeedBoundsDecider(priori)", "PathTimeHeuristicOptimizer", "SpeedDecider", "SpeedBoundsDecider(final)", "PiecewiseJerkSpeedOptimizer"]
+            },
+            {
+              "name": "PULL_OVER_RETRY_PARKING",
+              "type": "PullOverStageRetryParking",
+              "enabled": true,
+              "tasks": ["OpenSpaceRoiDecider", "OpenSpaceTrajectoryProvider", "OpenSpaceTrajectoryPartition", "OpenSpaceFallbackDecider"]
+            }
+          ]
+        },
+        {
+          "name": "square",
+          "description": "方形区域泊车",
+          "stages": [
+            {
+              "name": "SQUARE_LANE_FOLLOW_STAGE",
+              "type": "SquareLaneFollowStage",
+              "enabled": true,
+              "tasks": ["ObstacleNudgeDecider", "SquarePath", "LaneBorrowPathGeneric", "FallbackPath", "RuleBasedStopDecider", "SpeedBoundsDecider(priori)", "PathTimeHeuristicOptimizer", "SpeedDecider", "SpeedBoundsDecider(final)", "PiecewiseJerkSpeedOptimizer"]
+            },
+            {
+              "name": "EXTRICATE_STAGE",
+              "type": "ExtricateStage",
+              "enabled": true,
+              "tasks": ["ObstacleNudgeDecider", "LaneFollowPath", "LaneBorrowPathGeneric", "ReversePath", "ReverseSpeed", "PiecewiseJerkSpeedOptimizer"]
+            }
+          ]
+        },
+        {
+          "name": "stop_sign_unprotected",
+          "description": "无保护停车标志",
+          "stages": [
+            {
+              "name": "STOP_SIGN_UNPROTECTED_PRE_STOP",
+              "type": "StopSignUnprotectedStagePreStop",
+              "enabled": true,
+              "tasks": ["LaneFollowPath", "LaneBorrowPath", "FallbackPath", "PathDecider", "RuleBasedStopDecider", "SpeedBoundsDecider(priori)", "PathTimeHeuristicOptimizer", "SpeedDecider", "SpeedBoundsDecider(final)", "PiecewiseJerkSpeedOptimizer"]
+            },
+            {
+              "name": "STOP_SIGN_UNPROTECTED_STOP",
+              "type": "StopSignUnprotectedStageStop",
+              "enabled": true,
+              "tasks": ["LaneFollowPath", "LaneBorrowPath", "FallbackPath", "PathDecider", "RuleBasedStopDecider", "SpeedBoundsDecider(priori)", "PathTimeHeuristicOptimizer", "SpeedDecider", "SpeedBoundsDecider(final)", "PiecewiseJerkSpeedOptimizer"]
+            },
+            {
+              "name": "STOP_SIGN_UNPROTECTED_CREEP",
+              "type": "StopSignUnprotectedStageCreep",
+              "enabled": true,
+              "tasks": ["LaneFollowPath", "LaneBorrowPath", "FallbackPath", "PathDecider", "RuleBasedStopDecider", "SpeedBoundsDecider(priori)", "PathTimeHeuristicOptimizer", "SpeedDecider", "SpeedBoundsDecider(final)", "PiecewiseJerkSpeedOptimizer"]
+            },
+            {
+              "name": "STOP_SIGN_UNPROTECTED_INTERSECTION_CRUISE",
+              "type": "StopSignUnprotectedStageIntersectionCruise",
+              "enabled": true,
+              "tasks": ["LaneFollowPath", "LaneBorrowPath", "FallbackPath", "PathDecider", "RuleBasedStopDecider", "SpeedBoundsDecider(priori)", "PathTimeHeuristicOptimizer", "SpeedDecider", "SpeedBoundsDecider(final)", "PiecewiseJerkSpeedOptimizer"]
+            }
+          ]
+        },
+        {
+          "name": "traffic_light_protected",
+          "description": "有保护红绿灯",
+          "stages": [
+            {
+              "name": "TRAFFIC_LIGHT_PROTECTED_APPROACH",
+              "type": "TrafficLightProtectedStageApproach",
+              "enabled": true,
+              "tasks": ["LaneFollowPath", "LaneBorrowPath", "FallbackPath", "PathDecider", "RuleBasedStopDecider", "STBoundsDecider", "SpeedBoundsDecider(priori)", "PathTimeHeuristicOptimizer", "SpeedDecider", "SpeedBoundsDecider(final)", "PiecewiseJerkSpeedOptimizer"]
+            },
+            {
+              "name": "TRAFFIC_LIGHT_PROTECTED_INTERSECTION_CRUISE",
+              "type": "TrafficLightProtectedStageIntersectionCruise",
+              "enabled": true,
+              "tasks": ["LaneFollowPath", "LaneBorrowPath", "FallbackPath", "PathDecider", "RuleBasedStopDecider", "STBoundsDecider", "SpeedBoundsDecider(priori)", "PathTimeHeuristicOptimizer", "SpeedDecider", "SpeedBoundsDecider(final)", "PiecewiseJerkSpeedOptimizer"]
+            }
+          ]
+        },
+        {
+          "name": "traffic_light_unprotected_left_turn",
+          "description": "无保护红绿灯左转",
+          "stages": [
+            {
+              "name": "TRAFFIC_LIGHT_UNPROTECTED_LEFT_TURN_APPROACH",
+              "type": "TrafficLightUnprotectedLeftTurnStageApproach",
+              "enabled": true,
+              "tasks": ["LaneFollowPath", "LaneBorrowPath", "FallbackPath", "PathDecider", "RuleBasedStopDecider", "STBoundsDecider", "SpeedBoundsDecider(priori)", "PathTimeHeuristicOptimizer", "SpeedDecider", "SpeedBoundsDecider(final)", "PiecewiseJerkSpeedOptimizer"]
+            },
+            {
+              "name": "TRAFFIC_LIGHT_UNPROTECTED_LEFT_TURN_CREEP",
+              "type": "TrafficLightUnprotectedLeftTurnStageCreep",
+              "enabled": true,
+              "tasks": ["LaneFollowPath", "LaneBorrowPath", "FallbackPath", "PathDecider", "RuleBasedStopDecider", "STBoundsDecider", "SpeedBoundsDecider(priori)", "PathTimeHeuristicOptimizer", "SpeedDecider", "SpeedBoundsDecider(final)", "PiecewiseJerkSpeedOptimizer"]
+            },
+            {
+              "name": "TRAFFIC_LIGHT_UNPROTECTED_LEFT_TURN_INTERSECTION_CRUISE",
+              "type": "TrafficLightUnprotectedLeftTurnStageIntersectionCruise",
+              "enabled": true,
+              "tasks": ["LaneFollowPath", "LaneBorrowPath", "FallbackPath", "PathDecider", "RuleBasedStopDecider", "STBoundsDecider", "SpeedBoundsDecider(priori)", "PathTimeHeuristicOptimizer", "SpeedDecider", "SpeedBoundsDecider(final)", "PiecewiseJerkSpeedOptimizer"]
+            }
+          ]
+        },
+        {
+          "name": "traffic_light_unprotected_right_turn",
+          "description": "无保护红绿灯右转",
+          "stages": [
+            {
+              "name": "TRAFFIC_LIGHT_UNPROTECTED_RIGHT_TURN_STOP",
+              "type": "TrafficLightUnprotectedRightTurnStageStop",
+              "enabled": true,
+              "tasks": ["LaneFollowPath", "LaneBorrowPath", "FallbackPath", "PathDecider", "RuleBasedStopDecider", "STBoundsDecider", "SpeedBoundsDecider(priori)", "PathTimeHeuristicOptimizer", "SpeedDecider", "SpeedBoundsDecider(final)", "PiecewiseJerkSpeedOptimizer"]
+            },
+            {
+              "name": "TRAFFIC_LIGHT_UNPROTECTED_RIGHT_TURN_CREEP",
+              "type": "TrafficLightUnprotectedRightTurnStageCreep",
+              "enabled": true,
+              "tasks": ["LaneFollowPath", "LaneBorrowPath", "FallbackPath", "PathDecider", "RuleBasedStopDecider", "STBoundsDecider", "SpeedBoundsDecider(priori)", "PathTimeHeuristicOptimizer", "SpeedDecider", "SpeedBoundsDecider(final)", "PiecewiseJerkSpeedOptimizer"]
+            },
+            {
+              "name": "TRAFFIC_LIGHT_UNPROTECTED_RIGHT_TURN_INTERSECTION_CRUISE",
+              "type": "TrafficLightUnprotectedRightTurnStageIntersectionCruise",
+              "enabled": true,
+              "tasks": ["LaneFollowPath", "LaneBorrowPath", "FallbackPath", "PathDecider", "RuleBasedStopDecider", "STBoundsDecider", "SpeedBoundsDecider(priori)", "PathTimeHeuristicOptimizer", "SpeedDecider", "SpeedBoundsDecider(final)", "PiecewiseJerkSpeedOptimizer"]
+            }
+          ]
+        },
+        {
+          "name": "valet_parking",
+          "description": "代客泊车",
+          "stages": [
+            {
+              "name": "VALET_PARKING_APPROACHING_PARKING_SPOT",
+              "type": "StageApproachingParkingSpot",
+              "enabled": true,
+              "tasks": ["OpenSpacePreStopDecider", "LaneFollowPath", "LaneBorrowPath", "FallbackPath", "PathDecider", "RuleBasedStopDecider", "SpeedBoundsDecider(priori)", "PathTimeHeuristicOptimizer", "SpeedDecider", "SpeedBoundsDecider(final)", "PiecewiseJerkSpeedOptimizer"]
+            },
+            {
+              "name": "VALET_PARKING_PARKING",
+              "type": "StageParking",
+              "enabled": true,
+              "tasks": ["OpenSpaceRoiDecider", "OpenSpaceTrajectoryProvider", "OpenSpaceTrajectoryPartition", "OpenSpaceFallbackDecider"]
+            }
+          ]
+        },
+        {
+          "name": "valet_parking_park",
+          "description": "代客泊车-泊入",
+          "stages": [
+            {
+              "name": "VALET_PARKING_APPROACHING_PARKING_SPOT_PARK",
+              "type": "StageApproachingParkingSpotPark",
+              "enabled": true,
+              "tasks": ["OpenSpacePreStopDecider", "ObstacleNudgeDecider", "LaneChangePathGeneric", "LaneFollowPath", "LaneBorrowPathGeneric", "FallbackPath", "PathDecider", "RuleBasedStopDecider", "SpeedBoundsDecider(priori)", "PathTimeHeuristicOptimizer", "SpeedDecider", "SpeedBoundsDecider(final)", "PiecewiseJerkSpeedOptimizer"],
+              "fallback_task": "SmoothStopTrajectoryFallback"
+            },
+            {
+              "name": "VALET_PARKING_PARKING_PARK",
+              "type": "StageParkingPark",
+              "enabled": true,
+              "tasks": ["OpenSpaceReplanDecider", "OpenSpaceRoiDecider", "OpenSpacePathPlanning", "OpenSpaceTrajectoryOptimizerPark", "OpenSpaceTrajectoryPostProcess", "OpenSpaceFallbackDeciderPark"]
+            },
+            {
+              "name": "VALET_PARKING_RETRY_PARK",
+              "type": "StageParkingRetryPark",
+              "enabled": true,
+              "tasks": ["OpenSpaceReplanDecider", "OpenSpaceRoiDecider", "OpenSpacePathPlanning", "OpenSpaceTrajectoryOptimizerPark", "OpenSpaceTrajectoryPostProcess", "OpenSpaceFallbackDeciderPark"]
+            }
+          ]
+        },
+        {
+          "name": "yield_sign",
+          "description": "让行标志",
+          "stages": [
+            {
+              "name": "YIELD_SIGN_APPROACH",
+              "type": "YieldSignStageApproach",
+              "enabled": true,
+              "tasks": ["LaneFollowPath", "LaneBorrowPath", "FallbackPath", "PathDecider", "RuleBasedStopDecider", "SpeedBoundsDecider(priori)", "PathTimeHeuristicOptimizer", "SpeedDecider", "SpeedBoundsDecider(final)", "PiecewiseJerkSpeedOptimizer"]
+            },
+            {
+              "name": "YIELD_SIGN_CREEP",
+              "type": "YieldSignStageCreep",
+              "enabled": true,
+              "tasks": ["LaneFollowPath", "LaneBorrowPath", "FallbackPath", "PathDecider", "RuleBasedStopDecider", "SpeedBoundsDecider(priori)", "PathTimeHeuristicOptimizer", "SpeedDecider", "SpeedBoundsDecider(final)", "PiecewiseJerkSpeedOptimizer"]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "tasks",
+      "path": "modules/planning/tasks",
+      "description": "任务层(35种任务)",
+      "categories": {
+        "path_planning": {
+          "description": "路径规划类任务",
+          "tasks": [
+            {"name": "LaneFollowPath", "path": "tasks/lane_follow_path", "description": "车道跟随路径规划"},
+            {"name": "LaneBorrowPath", "path": "tasks/lane_borrow_path", "description": "借道路径规划"},
+            {"name": "LaneChangePath", "path": "tasks/lane_change_path", "description": "换道路径规划"},
+            {"name": "LaneBorrowPathGeneric", "path": "tasks/lane_borrow_path_generic", "description": "通用借道路径"},
+            {"name": "LaneChangePathGeneric", "path": "tasks/lane_change_path_generic", "description": "通用换道路径"},
+            {"name": "PullOverPath", "path": "tasks/pull_over_path", "description": "靠边停车路径"},
+            {"name": "FallbackPath", "path": "tasks/fallback_path", "description": "后备路径"},
+            {"name": "ReusePath", "path": "tasks/reuse_path", "description": "路径复用"},
+            {"name": "ReversePath", "path": "tasks/reverse_path", "description": "倒车路径"},
+            {"name": "SquarePath", "path": "tasks/square_path", "description": "方形路径"}
+          ]
+        },
+        "speed_planning": {
+          "description": "速度规划类任务",
+          "tasks": [
+            {"name": "SpeedBoundsDecider", "path": "tasks/speed_bounds_decider", "description": "速度边界决策(先验+最终两轮)"},
+            {"name": "STBoundsDecider", "path": "tasks/st_bounds_decider", "description": "ST边界决策"},
+            {"name": "PathTimeHeuristicOptimizer", "path": "tasks/path_time_heuristic", "description": "路径时间启发式优化(DP)"},
+            {"name": "PiecewiseJerkSpeedOptimizer", "path": "tasks/piecewise_jerk_speed", "description": "分段Jerk速度优化(QP)"},
+            {"name": "PiecewiseJerkSpeedNonlinearOptimizer", "path": "tasks/piecewise_jerk_speed_nonlinear", "description": "非线性分段Jerk速度优化"},
+            {"name": "SpeedDecider", "path": "tasks/speed_decider", "description": "速度决策(跟车/超车/停车)"},
+            {"name": "ReverseSpeed", "path": "tasks/reverse_speed", "description": "倒车速度规划"}
+          ]
+        },
+        "decision": {
+          "description": "决策类任务",
+          "tasks": [
+            {"name": "ObstacleNudgeDecider", "path": "tasks/obstacle_nudge_decider", "description": "障碍物微调决策"},
+            {"name": "PathDecider", "path": "tasks/path_decider", "description": "路径决策(忽略/绕行/停止)"},
+            {"name": "PathReferenceDecider", "path": "tasks/path_reference_decider", "description": "路径参考决策"},
+            {"name": "RuleBasedStopDecider", "path": "tasks/rule_based_stop_decider", "description": "基于规则停车决策"},
+            {"name": "RssDecider", "path": "tasks/rss_decider", "description": "RSS安全决策"},
+            {"name": "OpenSpaceFallbackDecider", "path": "tasks/open_space_fallback_decider", "description": "开放空间后备决策"},
+            {"name": "OpenSpaceReplanDecider", "path": "tasks/open_space_replan_decider", "description": "开放空间重规划决策"}
+          ]
+        },
+        "open_space": {
+          "description": "开放空间类任务",
+          "tasks": [
+            {"name": "OpenSpaceRoiDecider", "path": "tasks/open_space_roi_decider", "description": "ROI区域决策"},
+            {"name": "OpenSpaceRoiDeciderPark", "path": "tasks/open_space_roi_decider_park", "description": "泊车ROI区域决策"},
+            {"name": "OpenSpacePreStopDecider", "path": "tasks/open_space_pre_stop_decider", "description": "开放空间预停车决策"},
+            {"name": "OpenSpacePathPlanning", "path": "tasks/open_space_path_planning", "description": "开放空间路径规划(HybridA*)"},
+            {"name": "OpenSpaceTrajectoryProvider", "path": "tasks/open_space_trajectory_provider", "description": "开放空间轨迹提供"},
+            {"name": "OpenSpaceTrajectoryOptimizerPark", "path": "tasks/open_space_trajectory_optimizer_park", "description": "泊车开放空间轨迹优化"},
+            {"name": "OpenSpaceTrajectoryPartition", "path": "tasks/open_space_trajectory_partition", "description": "开放空间轨迹分割(前/后/换挡)"},
+            {"name": "OpenSpaceTrajectoryPostProcess", "path": "tasks/open_space_trajectory_post_process", "description": "开放空间轨迹后处理"},
+            {"name": "OpenSpaceFallbackDeciderPark", "path": "tasks/open_space_fallback_decider_park", "description": "泊车开放空间后备决策"}
+          ]
+        },
+        "fallback": {
+          "description": "后备类任务",
+          "tasks": [
+            {"name": "FastStopTrajectoryFallback", "path": "tasks/fast_stop_trajectory_fallback", "description": "快速停车轨迹后备"},
+            {"name": "SmoothStopTrajectoryFallback", "path": "tasks/smooth_stop_trajectory_fallback", "description": "平滑停车轨迹后备"}
+          ]
+        }
+      }
+    },
+    {
+      "name": "traffic_rules",
+      "path": "modules/planning/traffic_rules",
+      "description": "交通规则层(10种规则)",
+      "rules": [
+        {"name": "backside_vehicle", "description": "后方车辆处理"},
+        {"name": "crosswalk", "description": "人行横道让行"},
+        {"name": "destination", "description": "目的地停车"},
+        {"name": "keepclear", "description": "禁停区处理"},
+        {"name": "reference_line_end", "description": "参考线终点处理"},
+        {"name": "rerouting", "description": "重路由触发"},
+        {"name": "speed_setting", "description": "速度设置"},
+        {"name": "stop_sign", "description": "停车标志处理"},
+        {"name": "traffic_light", "description": "红绿灯处理"},
+        {"name": "yield_sign", "description": "让行标志处理"}
+      ]
+    },
+    {
+      "name": "planning_interface_base",
+      "path": "modules/planning/planning_interface_base",
+      "description": "接口基类层",
+      "base_classes": [
+        {"name": "Planner", "file": "planner_base/planner.h", "key_methods": ["Init()", "Plan()", "Stop()"], "derived": ["PlannerWithReferenceLine"]},
+        {"name": "PlannerWithReferenceLine", "file": "planner_base/planner.h", "key_methods": ["PlanOnReferenceLine()"], "derived": ["PublicRoadPlanner", "LatticePlanner", "NaviPlanner"]},
+        {"name": "Scenario", "file": "scenario_base/scenario.h", "key_methods": ["Init()", "Process()", "IsTransferable()", "Enter()", "Exit()", "Reset()"]},
+        {"name": "Stage", "file": "scenario_base/stage.h", "key_methods": ["Init()", "Process()", "ExecuteTaskOnReferenceLine()", "ExecuteTaskOnOpenSpace()"]},
+        {"name": "Task", "file": "task_base/task.h", "key_methods": ["Init()", "Execute()"]},
+        {"name": "TrafficDecider", "file": "traffic_rules_base/traffic_decider.h", "key_methods": ["Init()", "Execute()"]},
+        {"name": "TrafficRule", "file": "traffic_rules_base/traffic_rule.h", "key_methods": ["Init()", "ApplyRule()"]}
+      ]
+    },
+    {
+      "name": "planning_open_space",
+      "path": "modules/planning/planning_open_space",
+      "description": "开放空间规划(泊车场景)",
+      "sub_dirs": [
+        {"name": "coarse_trajectory_generator", "description": "粗轨迹生成(HybridA*)"},
+        {"name": "trajectory_smoother", "description": "轨迹平滑(35个文件)"},
+        {"name": "utils", "description": "工具函数"},
+        {"name": "proto", "description": "配置定义"}
+      ]
+    },
+    {
+      "name": "pnc_map",
+      "path": "modules/planning/pnc_map",
+      "description": "路径导航地图",
+      "sub_dirs": [
+        {"name": "lane_follow_map", "description": "车道跟随地图(8个文件)"}
+      ]
+    },
+    {
+      "name": "park_data_center",
+      "path": "modules/planning/park_data_center",
+      "description": "泊车数据中心",
+      "core_classes": [
+        {"name": "ParkDataCenter", "description": "泊车数据管理"},
+        {"name": "NudgeInfo", "description": "微调信息"}
+      ]
+    }
+  ],
+
+  "class_hierarchy": {
+    "description": "类继承关系",
+    "relationships": [
+      {"from": "PlanningComponent", "to": "cyber::Component", "relation": "inherits"},
+      {"from": "PlanningBase", "to": "none", "relation": "base_class"},
+      {"from": "OnLanePlanning", "to": "PlanningBase", "relation": "inherits"},
+      {"from": "NaviPlanning", "to": "PlanningBase", "relation": "inherits"},
+      {"from": "Planner", "to": "none", "relation": "base_class"},
+      {"from": "PlannerWithReferenceLine", "to": "Planner", "relation": "inherits"},
+      {"from": "PublicRoadPlanner", "to": "PlannerWithReferenceLine", "relation": "inherits"},
+      {"from": "LatticePlanner", "to": "PlannerWithReferenceLine", "relation": "inherits"},
+      {"from": "Scenario", "to": "none", "relation": "base_class"},
+      {"from": "LaneFollowScenario", "to": "Scenario", "relation": "inherits"},
+      {"from": "Stage", "to": "none", "relation": "base_class"},
+      {"from": "LaneFollowStage", "to": "Stage", "relation": "inherits"},
+      {"from": "BaseStageCreep", "to": "Stage", "relation": "inherits"},
+      {"from": "BaseStageCruise", "to": "Stage", "relation": "inherits"},
+      {"from": "Task", "to": "none", "relation": "base_class"},
+      {"from": "TrafficRule", "to": "none", "relation": "base_class"}
+    ]
+  },
+
+  "dependency_graph": {
+    "description": "核心类依赖关系",
+    "relationships": [
+      {"from": "PlanningComponent", "to": "PlanningBase", "relation": "uses"},
+      {"from": "PlanningComponent", "to": "DependencyInjector", "relation": "creates"},
+      {"from": "PlanningComponent", "to": "LocalView", "relation": "assembles"},
+      {"from": "PlanningBase", "to": "Planner", "relation": "uses"},
+      {"from": "PlanningBase", "to": "Frame", "relation": "creates"},
+      {"from": "PlanningBase", "to": "TrafficDecider", "relation": "uses"},
+      {"from": "OnLanePlanning", "to": "ReferenceLineProvider", "relation": "uses"},
+      {"from": "PublicRoadPlanner", "to": "ScenarioManager", "relation": "uses"},
+      {"from": "ScenarioManager", "to": "Scenario", "relation": "manages"},
+      {"from": "Scenario", "to": "Stage", "relation": "contains"},
+      {"from": "Stage", "to": "Task", "relation": "executes"},
+      {"from": "Frame", "to": "ReferenceLineInfo", "relation": "contains_list"},
+      {"from": "Frame", "to": "Obstacle", "relation": "contains"},
+      {"from": "ReferenceLineInfo", "to": "ReferenceLine", "relation": "contains"},
+      {"from": "ReferenceLineInfo", "to": "PathData", "relation": "contains"},
+      {"from": "ReferenceLineInfo", "to": "SpeedData", "relation": "contains"},
+      {"from": "ReferenceLineInfo", "to": "PathDecision", "relation": "contains"},
+      {"from": "ReferenceLineInfo", "to": "StGraphData", "relation": "contains"},
+      {"from": "ReferenceLineInfo", "to": "DiscretizedTrajectory", "relation": "contains"}
+    ]
+  },
+
+  "planning_cycle_flow": {
+    "description": "一次完整规划周期流程",
+    "steps": [
+      {
+        "step": 1,
+        "name": "PlanningComponent::Proc()",
+        "description": "接收3个主输入，组装LocalView，检查数据就绪",
+        "sub_steps": [
+          "CheckRerouting()",
+          "组装LocalView(prediction/chassis/localization/traffic_light/pad_msg/planning_command/stories/control_interactive)",
+          "CheckInput()(检查localization/chassis/map/planning_command就绪)",
+          "学习模式数据处理(如果启用)",
+          "调用PlanningBase::RunOnce()"
+        ]
+      },
+      {
+        "step": 2,
+        "name": "OnLanePlanning::RunOnce()",
+        "description": "车道线模式规划主循环",
+        "sub_steps": [
+          "更新ReferenceLineProvider(从路由获取参考线)",
+          "TrajectoryStitcher::Stitch()(缝合历史轨迹与新规划起始点)",
+          "InitFrame()(初始化规划帧)",
+          "  - 获取参考线列表",
+          "  - 裁剪参考线(FLAGS_look_backward_distance + LookForwardDistance)",
+          "  - Frame::Init()(初始化障碍物/红绿灯/PadMsg等)",
+          "  - TrafficDecider::Execute()(按顺序执行10种交通规则)",
+          "Planner::Plan()(执行规划)"
+        ]
+      },
+      {
+        "step": 3,
+        "name": "PublicRoadPlanner::Plan()",
+        "description": "公开道路规划器",
+        "sub_steps": [
+          "ScenarioManager::Update()(场景切换判断)",
+          "  - 遍历scenario_list_",
+          "  - 当前场景STATUS_PROCESSING则不切换",
+          "  - 检查各场景IsTransferable()",
+          "  - 可切换: Exit(当前)->Reset(新)->Enter(新)",
+          "Scenario::Process()(场景处理)"
+        ]
+      },
+      {
+        "step": 4,
+        "name": "Scenario::Process()",
+        "description": "场景处理，委托给当前Stage",
+        "sub_steps": [
+          "current_stage_->Process(planning_init_point, frame)",
+          "Stage内部按序执行Task列表"
+        ]
+      },
+      {
+        "step": 5,
+        "name": "Stage::ExecuteTaskOnReferenceLine()",
+        "description": "在参考线上执行任务链(典型的OnLane流程)",
+        "sub_steps": [
+          "路径规划阶段:",
+          "  1. LaneChangePath/LaneFollowPath/LaneBorrowPath(候选路径生成)",
+          "  2. FallbackPath(后备路径)",
+          "  3. PathDecider(路径决策-忽略/绕行/停止)",
+          "  4. RuleBasedStopDecider(基于规则停车决策)",
+          "速度规划阶段:",
+          "  5. SpeedBoundsDecider(priori)(先验速度边界)",
+          "  6. PathTimeHeuristicOptimizer(DP速度优化)",
+          "  7. SpeedDecider(速度决策-跟车/超车/停车)",
+          "  8. SpeedBoundsDecider(final)(最终速度边界)",
+          "  9. PiecewiseJerkSpeedOptimizer(QP速度优化)",
+          "合并阶段:",
+          "  10. CombinePathAndSpeedProfile(合并路径和速度为轨迹)"
+        ]
+      },
+      {
+        "step": 6,
+        "name": "输出处理",
+        "description": "填充并发布规划结果",
+        "sub_steps": [
+          "CombinePathAndSpeedProfile(合并路径和速度曲线)",
+          "FillPlanningPb(填充轨迹消息头部/时间戳)",
+          "SetLocation(设置位置和车道边界)",
+          "修正轨迹点relative_time",
+          "PlanningComponent::planning_writer_->Write(发布ADCTrajectory)",
+          "发布CommandStatus(RUNNING/FINISHED/ERROR)",
+          "记录到History"
+        ]
+      }
+    ]
+  },
+
+  "task_statistics": {
+    "description": "Task使用频率统计(从pipeline配置中统计)",
+    "most_used_tasks": [
+      {"name": "LaneFollowPath", "usage_count": 16, "description": "几乎所有OnLane场景都使用"},
+      {"name": "FallbackPath", "usage_count": 15, "description": "几乎所有OnLane场景都使用"},
+      {"name": "PathDecider", "usage_count": 14, "description": "大部分OnLane场景使用"},
+      {"name": "RuleBasedStopDecider", "usage_count": 14, "description": "大部分OnLane场景使用"},
+      {"name": "SpeedBoundsDecider", "usage_count": 16, "description": "所有OnLane场景使用(priori+final两轮)"},
+      {"name": "PathTimeHeuristicOptimizer", "usage_count": 16, "description": "所有OnLane场景使用"},
+      {"name": "SpeedDecider", "usage_count": 16, "description": "所有OnLane场景使用"},
+      {"name": "PiecewiseJerkSpeedOptimizer", "usage_count": 16, "description": "所有OnLane场景使用"},
+      {"name": "LaneBorrowPath", "usage_count": 13, "description": "大部分OnLane场景使用"},
+      {"name": "OpenSpaceTrajectoryProvider", "usage_count": 6, "description": "泊车相关场景使用"},
+      {"name": "OpenSpaceRoiDecider", "usage_count": 6, "description": "泊车相关场景使用"},
+      {"name": "OpenSpaceTrajectoryPartition", "usage_count": 6, "description": "泊车相关场景使用"}
+    ],
+    "specialized_tasks": [
+      {"name": "PullOverPath", "usage_count": 3, "used_in": ["pull_over", "emergency_pull_over"]},
+      {"name": "RssDecider", "usage_count": 2, "used_in": ["pull_over", "park_and_go"]},
+      {"name": "STBoundsDecider", "usage_count": 5, "used_in": ["traffic_light_protected", "traffic_light_unprotected_left_turn", "traffic_light_unprotected_right_turn", "park_and_go", "pull_over(retry)"]},
+      {"name": "SquarePath", "usage_count": 1, "used_in": ["square"]},
+      {"name": "ReversePath", "usage_count": 1, "used_in": ["square"]},
+      {"name": "ReverseSpeed", "usage_count": 1, "used_in": ["square"]},
+      {"name": "ObstacleNudgeDecider", "usage_count": 3, "used_in": ["square", "valet_parking_park"]},
+      {"name": "LaneBorrowPathGeneric", "usage_count": 3, "used_in": ["square", "valet_parking_park"]},
+      {"name": "LaneChangePathGeneric", "usage_count": 1, "used_in": ["valet_parking_park"]},
+      {"name": "OpenSpacePathPlanning", "usage_count": 3, "used_in": ["large_curvature", "valet_parking_park"]},
+      {"name": "OpenSpaceTrajectoryOptimizerPark", "usage_count": 3, "used_in": ["large_curvature", "valet_parking_park"]},
+      {"name": "OpenSpaceReplanDecider", "usage_count": 3, "used_in": ["large_curvature", "valet_parking_park"]},
+      {"name": "OpenSpaceFallbackDeciderPark", "usage_count": 3, "used_in": ["large_curvature", "valet_parking_park"]}
+    ]
+  },
+
+  "scenario_transition_logic": {
+    "description": "场景切换逻辑",
+    "rules": [
+      "默认场景为LANE_FOLLOW，初始化时进入",
+      "当前场景STATUS_PROCESSING时不切换(最高优先级)",
+      "遍历所有已注册场景，检查IsTransferable()",
+      "场景切换顺序: Exit(当前)->Reset(新)->Enter(新)",
+      "场景STATUS_DONE后再次Update()可能切换回LANE_FOLLOW",
+      "场景通过IsTransferable()判断是否满足进入条件(如检测到红绿灯/停车标志等)"
+    ]
+  },
+
+  "two_phase_planning": {
+    "description": "路径-速度分离规划(核心算法架构)",
+    "path_phase": {
+      "description": "路径规划阶段 - 在Frenet坐标系下优化横向位移",
+      "steps": [
+        "1. 生成候选PathBoundary(车道跟随/借道/换道/靠边)",
+        "2. 在PathBoundary内优化路径(Frenet l坐标)",
+        "3. 选择最优路径(基于代价函数)",
+        "4. PathDecider对障碍物做决策(忽略/绕行/停止)"
+      ]
+    },
+    "speed_phase": {
+      "description": "速度规划阶段 - 在ST图上优化纵向速度",
+      "steps": [
+        "1. SpeedBoundsDecider计算ST图边界",
+        "2. PathTimeHeuristicOptimizer用DP求粗略速度曲线",
+        "3. SpeedDecider决定跟车/超车/停车",
+        "4. SpeedBoundsDecider用决策结果重新计算边界",
+        "5. PiecewiseJerkSpeedOptimizer用QP精细优化速度曲线"
+      ]
+    },
+    "merge_phase": {
+      "description": "合并阶段",
+      "steps": [
+        "1. CombinePathAndSpeedProfile将路径和速度合并为轨迹",
+        "2. 每个路径点(s,l) + 速度点(s,t) -> 轨迹点(x,y,v,a,t)"
+      ]
+    }
+  }
+}

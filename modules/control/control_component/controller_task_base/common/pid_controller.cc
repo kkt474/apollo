@@ -34,13 +34,13 @@ double PIDController::Control(const double error, const double dt) {
   if (first_hit_) {
     first_hit_ = false;
   } else {
-    diff = (error - previous_error_) / dt;
+    diff = (error - previous_error_) / dt;   //  微分
   }
   // integral hold
   if (!integrator_enabled_) {
     integral_ = 0;
   } else if (!integrator_hold_) {
-    integral_ += error * dt * ki_;
+    integral_ += error * dt * ki_;  //  积分累加
     // apply Ki before integrating to avoid steps when change Ki at steady state
     if (integral_ > integrator_saturation_high_) {
       integral_ = integrator_saturation_high_;

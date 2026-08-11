@@ -39,11 +39,13 @@ HybridAStar::HybridAStar(const PlannerOpenSpaceConfig& open_space_conf) {
     planner_open_space_config_.CopyFrom(open_space_conf);
     reed_shepp_generator_ = std::make_unique<ReedShepp>(vehicle_param_, planner_open_space_config_);
     grid_a_star_heuristic_generator_ = std::make_unique<GridSearch>(planner_open_space_config_);
+    // 每个节点扩展的子节点数
     next_node_num_ = planner_open_space_config_.warm_start_config().next_node_num();
     max_steer_angle_ = vehicle_param_.max_steer_angle() / vehicle_param_.steer_ratio()
             * planner_open_space_config_.warm_start_config().traj_kappa_contraint_ratio();
     step_size_ = planner_open_space_config_.warm_start_config().step_size();
     xy_grid_resolution_ = planner_open_space_config_.warm_start_config().xy_grid_resolution();
+    // max_steer_angle_ * 2 / (next_node_num_ / 2 - 1)：相邻两个转向角之间的最小差值
     arc_length_ = planner_open_space_config_.warm_start_config().phi_grid_resolution() * vehicle_param_.wheel_base()
             / std::tan(max_steer_angle_ * 2 / (next_node_num_ / 2 - 1));
     if (arc_length_ < std::sqrt(2) * xy_grid_resolution_) {
@@ -144,6 +146,7 @@ bool HybridAStar::RSPLengthCheck(const std::shared_ptr<ReedSheppPath> reeds_shep
     return true;
 }
 
+// 对一个节点表示的整条路径弧段做逐点检查
 bool HybridAStar::ValidityCheck(std::shared_ptr<Node3d> node) {
     CHECK_NOTNULL(node);
     CHECK_GT(node->GetStepSize(), 0U);
@@ -159,11 +162,13 @@ bool HybridAStar::ValidityCheck(std::shared_ptr<Node3d> node) {
 
     // The first {x, y, phi} is collision free unless they are start and end
     // configuration of search problem
+    // 由Next_node_generator生成的弧段，它的第一个采样点就是父节点的最后一个点
+    // 父节点已经通过了碰撞检测。
     size_t check_start_index = 0;
     if (node_step_size == 1) {
-        check_start_index = 0;
+        check_start_index = 0;  // 起点或者是终点，必须检查
     } else {
-        check_start_index = 1;
+        check_start_index = 1;  // 跳过头点
     }
 
     for (size_t i = check_start_index; i < node_step_size; ++i) {
@@ -174,6 +179,7 @@ bool HybridAStar::ValidityCheck(std::shared_ptr<Node3d> node) {
         Box2d bounding_box = Node3d::GetBoundingBox(vehicle_param_, traversed_x[i], traversed_y[i], traversed_phi[i]);
         for (const auto& obstacle_linesegments : obstacles_linesegments_vec_) {
             for (const common::math::LineSegment2d& linesegment : obstacle_linesegments) {
+                // OBB-线段相交判断
                 if (bounding_box.HasOverlap(linesegment)) {
                     ADEBUG << "collision start at x: " << linesegment.start().x();
                     ADEBUG << "collision start at y: " << linesegment.start().y();
@@ -617,16 +623,23 @@ bool HybridAStar::TrajectoryPartition(
     partitioned_result->emplace_back();
     auto* current_traj = &(partitioned_result->back());
     double heading_angle = phi.front();
+
+    // 判断行驶方向
+    // 用轨迹前两个点计算前进方向 tracking_angle
     const Vec2d init_tracking_vector(x[1] - x[0], y[1] - y[0]);
     double tracking_angle = init_tracking_vector.Angle();
+    // 如果车辆方向与轨迹方向夹角 < 90° → 正向，否则倒车
     bool current_gear = std::abs(common::math::NormalizeAngle(tracking_angle - heading_angle)) < (M_PI_2);
     AINFO << x[0] << " " << y[0] << " " << phi[0];
+
+    // 遍历轨迹，按行驶方向分段
     for (size_t i = 0; i < horizon - 1; ++i) {
         heading_angle = phi[i];
         const Vec2d tracking_vector(x[i + 1] - x[i], y[i + 1] - y[i]);
         tracking_angle = tracking_vector.Angle();
         bool gear = std::abs(common::math::NormalizeAngle(tracking_angle - heading_angle)) < (M_PI_2);
         if (gear != current_gear) {
+            // 换方向时，新建一段
             current_traj->x.push_back(x[i]);
             current_traj->y.push_back(y[i]);
             current_traj->phi.push_back(phi[i]);
@@ -634,17 +647,20 @@ bool HybridAStar::TrajectoryPartition(
             current_traj = &(partitioned_result->back());
             current_gear = gear;
         }
+        // 当前段添加轨迹点
         current_traj->x.push_back(x[i]);
         current_traj->y.push_back(y[i]);
         current_traj->phi.push_back(phi[i]);
     }
     AINFO << x.back() << " " << y.back() << " " << phi.back();
+    //最终轨迹的最后一个点一定要加上
     current_traj->x.push_back(x.back());
     current_traj->y.push_back(y.back());
     current_traj->phi.push_back(phi.back());
 
     const auto start_timestamp = std::chrono::system_clock::now();
-
+    
+    // 生成速度/加速度/转向量
     // Retrieve v, a and steer from path
     for (auto& result : *partitioned_result) {
         if (FLAGS_use_s_curve_speed_smooth) {
@@ -794,8 +810,10 @@ bool HybridAStar::Plan(
             planner_warm_start_config_.desired_explored_num(), planner_warm_start_config_.max_explored_num());
     static constexpr int kMaxNodeNum = 200000;
     std::vector<std::shared_ptr<Node3d>> candidate_final_nodes;
-    while (!open_pq_.empty() && open_pq_.size() < kMaxNodeNum && available_result_num < desired_explored_num
-           && explored_node_num < max_explored_num) {
+    while (!open_pq_.empty() && 
+            open_pq_.size() < kMaxNodeNum && 
+            available_result_num < desired_explored_num && // 尚未找到足够多 RS 可行解
+            explored_node_num < max_explored_num) {  // 未超过最大探索数
         std::shared_ptr<Node3d> current_node = open_pq_.top().first;
         if (current_node->GetPreNode() != nullptr) {
             AINFO << "print_open_pq:" << "(" << current_node->GetPreNode()->GetX() << ", "

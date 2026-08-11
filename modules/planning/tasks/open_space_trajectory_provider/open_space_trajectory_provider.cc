@@ -76,19 +76,20 @@ void OpenSpaceTrajectoryProvider::Stop() {
   }
 }
 
+// 安全停止正在运行的异步规划线程，并将所有状态重置为初始值，为下一次规划做准备。
 void OpenSpaceTrajectoryProvider::Restart() {
   if (config_.enable_open_space_planner_thread()) {
-    is_generation_thread_stop_.store(true);
+    is_generation_thread_stop_.store(true);  // 通知线程停止
     if (thread_init_flag_) {
-      task_future_.get();
+      task_future_.get();     // 等待线程结束
     }
-    is_generation_thread_stop_.store(false);
-    thread_init_flag_ = false;
-    trajectory_updated_.store(false);
+    is_generation_thread_stop_.store(false);  // 重置停止标志
+    thread_init_flag_ = false;     // 重置初始化标志
+    trajectory_updated_.store(false);  
     trajectory_error_.store(false);
     trajectory_skipped_.store(false);
-    optimizer_thread_counter = 0;
-    is_planned_ = false;
+    optimizer_thread_counter = 0;  // 线程内部的优化迭代计数
+    is_planned_ = false;  // 	是否已完成一次规划
   }
 }
 

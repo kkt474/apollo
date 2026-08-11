@@ -82,6 +82,7 @@ std::pair<double, double> ReedShepp::calc_tau_omega(
     return std::make_pair(tau, omega);
 }
 
+//找出曲率满足车辆最小转弯半径且代价最小的那条，填入 reeds_shepp_to_check
 bool ReedShepp::ShortestRSP(
         const std::shared_ptr<Node3d> start_node,
         const std::shared_ptr<Node3d> end_node,
@@ -103,19 +104,24 @@ bool ReedShepp::ShortestRSP(
     for (size_t i = 0; i < paths_size; ++i) {
         double cost = 0;
         auto& path = all_possible_paths[i];
+        // 最小转弯半径
         double steering_radius = path.radius / max_kappa_;
         double steer_change_penalty_cost
                 = std::atan(vehicle_param_.wheel_base() / steering_radius * 2.0) * traj_steer_change_penalty_;
         for (size_t j = 0; j < path.segs_lengths.size(); j++) {
             if (path.segs_types[j] != 'S') {
+                // 转弯越多，cost越高
                 cost += std::fabs(path.segs_lengths[j]) * (traj_steer_penalty_) / max_kappa_ * path.radius;
+                // 转向变化惩罚 L R
                 if (j > 0 && (path.segs_types[j - 1] != 'S') && (path.segs_types[j - 1] != path.segs_types[j])) {
                     cost += steer_change_penalty_cost;
                 }
+                // 短距离惩罚
                 if (std::fabs(path.segs_lengths[j]) / max_kappa_ * path.radius < traj_expected_shortest_length_) {
                     cost += traj_short_length_penalty_;
                 }
             } else {
+                // 倒车惩罚
                 if (path.segs_lengths[j] < 0) {
                     cost += -path.segs_lengths[j] * traj_back_penalty_ / max_kappa_;
                 } else {
@@ -125,7 +131,7 @@ bool ReedShepp::ShortestRSP(
                     cost += traj_short_length_penalty_;
                 }
             }
-
+            // 换档惩罚
             if (j > 0 && path.segs_lengths[j] * path.segs_lengths[j - 1] < 0) {
                 cost += traj_gear_switch_penalty_;
             }
@@ -814,7 +820,9 @@ void ReedShepp::SLS(const double x, const double y, const double phi, RSPParam* 
     double t = 0.0;
     double v = 0.0;
     double epsilon = 1e-1;
+    // 目标在左侧，目标朝向角在(0,180)
     if (y > 0.0 && phi_mod > epsilon && phi_mod < M_PI) {
+        // 最后一段直线与目标姿态方向的交点位置
         xd = -y / std::tan(phi_mod) + x;
         t = xd - std::tan(phi_mod / 2.0);
         u = phi_mod;
@@ -823,7 +831,9 @@ void ReedShepp::SLS(const double x, const double y, const double phi, RSPParam* 
         param->u = u;
         param->t = t;
         param->v = v;
-    } else if (y < 0.0 && phi_mod > epsilon && phi_mod < M_PI) {
+    }
+    // 目标在右侧
+    else if (y < 0.0 && phi_mod > epsilon && phi_mod < M_PI) {
         xd = -y / std::tan(phi_mod) + x;
         t = xd - std::tan(phi_mod / 2.0);
         u = phi_mod;
@@ -958,7 +968,7 @@ bool ReedShepp::SetRSP(
     path.radius = radius;
     double sum = 0.0;
     for (int i = 0; i < size; ++i) {
-        sum += std::abs(lengths[i]);
+        sum += std::abs(lengths[i]);  // 绝对值
     }
     path.total_length = sum;
     if (path.total_length <= 0.0) {

@@ -59,6 +59,7 @@ Status OpenSpaceTrajectoryOptimizer::Plan(
     const Eigen::MatrixXd& obstacles_A, const Eigen::MatrixXd& obstacles_b,
     const std::vector<std::vector<Vec2d>>& obstacles_vertices_vec,
     double* time_latency) {
+  // 
   if (XYbounds.empty() || end_pose.empty() || obstacles_edges_num.cols() == 0 ||
       obstacles_A.cols() == 0 || obstacles_b.cols() == 0) {
     ADEBUG << "OpenSpaceTrajectoryOptimizer input data not ready";

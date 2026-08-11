@@ -44,12 +44,14 @@ double GridSearch::EuclidDistance(const double x1, const double y1, const double
 bool GridSearch::CheckConstraints(std::shared_ptr<Node2d> node) {
     const double node_grid_x = node->GetGridX();
     const double node_grid_y = node->GetGridY();
+    // 边界检测
     if (node_grid_x > max_grid_x_ || node_grid_x < 0 || node_grid_y > max_grid_y_ || node_grid_y < 0) {
         return false;
     }
     if (obstacles_linesegments_vec_.empty()) {
         return true;
     }
+    // 网格中心到障碍物线段距离检测
     for (const auto& obstacle_linesegments : obstacles_linesegments_vec_) {
         for (const common::math::LineSegment2d& linesegment : obstacle_linesegments) {
             if (linesegment.DistanceTo({node->GetGridX(), node->GetGridY()}) < node_radius_) {
@@ -185,7 +187,7 @@ bool GridSearch::GenerateAStarPath(
         close_set.emplace(current_node->GetIndex(), current_node);
         std::vector<std::shared_ptr<Node2d>> next_nodes = std::move(GenerateNextNodes(current_node));
         for (auto& next_node : next_nodes) {
-            if (!CheckConstraints(next_node)) {
+            if (!CheckConstraints(next_node)) {  
                 continue;
             }
             if (close_set.find(next_node->GetIndex()) != close_set.end()) {
@@ -211,12 +213,14 @@ bool GridSearch::GenerateAStarPath(
     return true;
 }
 
+// 构建距离场 dp_map_，供后续 CheckDpMap 查询
 bool GridSearch::GenerateDpMap(
         const double ex,
         const double ey,
         const std::vector<double>& XYbounds,
         const std::vector<std::vector<common::math::LineSegment2d>>& obstacles_linesegments_vec,
         const std::vector<std::vector<common::math::LineSegment2d>>& soft_boundary_linesegments_vec) {
+    // 优先队列(最小堆)
     std::priority_queue<std::pair<std::string, double>, std::vector<std::pair<std::string, double>>, cmp> open_pq;
     std::unordered_map<std::string, std::shared_ptr<Node2d>> open_set;
     dp_map_ = decltype(dp_map_)();
@@ -224,6 +228,7 @@ bool GridSearch::GenerateDpMap(
     // XYbounds with xmin, xmax, ymin, ymax
     max_grid_y_ = std::round((XYbounds_[3] - XYbounds_[2]) / xy_grid_resolution_);
     max_grid_x_ = std::round((XYbounds_[1] - XYbounds_[0]) / xy_grid_resolution_);
+    // 起点是end_node
     std::shared_ptr<Node2d> end_node = std::make_shared<Node2d>(ex, ey, xy_grid_resolution_, XYbounds_);
     obstacles_linesegments_vec_ = obstacles_linesegments_vec;
     open_set.emplace(end_node->GetIndex(), end_node);
@@ -235,22 +240,26 @@ bool GridSearch::GenerateDpMap(
         const std::string current_id = open_pq.top().first;
         open_pq.pop();
         std::shared_ptr<Node2d> current_node = open_set[current_id];
-        dp_map_.emplace(current_node->GetIndex(), current_node);
+        // 每次弹出代价最小的节点，直接加入dp_map_
+        dp_map_.emplace(current_node->GetIndex(), current_node);  // 已扩展节点存入 dp_map_
+        // 八邻域扩展
         std::vector<std::shared_ptr<Node2d>> next_nodes = std::move(GenerateNextNodes(current_node));
         for (auto& next_node : next_nodes) {
-            if (!CheckConstraints(next_node)) {
+            if (!CheckConstraints(next_node)) {   // 边界/障碍阻挡
                 continue;
             }
             if (dp_map_.find(next_node->GetIndex()) != dp_map_.end()) {
                 continue;
             }
-            if (open_set.find(next_node->GetIndex()) == open_set.end()) {
+            if (open_set.find(next_node->GetIndex()) == open_set.end()) { // open_set 中不存在
+                // 入队
                 ++explored_node_num;
                 next_node->SetPreNode(current_node);
                 open_set.emplace(next_node->GetIndex(), next_node);
                 open_pq.emplace(next_node->GetIndex(), next_node->GetCost());
             } else {
-                if (open_set[next_node->GetIndex()]->GetCost() > next_node->GetCost()) {
+                if (open_set[next_node->GetIndex()]->GetCost() > next_node->GetCost()) { // open_set 中已有且新代价更低
+                    // 更新代价 + 更新父节点;
                     open_set[next_node->GetIndex()]->SetCost(next_node->GetCost());
                     open_set[next_node->GetIndex()]->SetPreNode(current_node);
                 }
@@ -267,7 +276,7 @@ bool GridSearch::GenerateDpMap(
 double GridSearch::CheckDpMap(const double sx, const double sy) {
     std::string index = Node2d::CalcIndex(sx, sy, xy_grid_resolution_, XYbounds_);
     if (dp_map_.find(index) != dp_map_.end()) {
-        return dp_map_[index]->GetCost() * xy_grid_resolution_;
+        return dp_map_[index]->GetCost() * xy_grid_resolution_;  // 栅格单位累计的代价 * 分辨率 = 真实米制
     } else {
         return std::numeric_limits<double>::infinity();
     }

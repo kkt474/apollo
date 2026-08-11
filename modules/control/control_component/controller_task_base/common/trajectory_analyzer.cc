@@ -69,13 +69,14 @@ TrajectoryAnalyzer::TrajectoryAnalyzer(
   }
 }
 
+// 遍历粗搜索 + 黄金分割精搜索 + 插值    纵向误差计算
 PathPoint TrajectoryAnalyzer::QueryMatchedPathPoint(const double x,
                                                     const double y) const {
   CHECK_GT(trajectory_points_.size(), 0U);
 
   double d_min = PointDistanceSquare(trajectory_points_.front(), x, y);
   size_t index_min = 0;
-
+  // step1 粗搜索:遍历所有轨迹点，找到距离车辆位置(x,y)最近的离散点index_min
   for (size_t i = 1; i < trajectory_points_.size(); ++i) {
     double d_temp = PointDistanceSquare(trajectory_points_[i], x, y);
     if (d_temp < d_min) {
@@ -83,7 +84,7 @@ PathPoint TrajectoryAnalyzer::QueryMatchedPathPoint(const double x,
       index_min = i;
     }
   }
-
+  // step2 确定精搜索区间： 取最近点的前后两个相邻点，形成搜索区间[index_start, index_end]
   size_t index_start = index_min == 0 ? index_min : index_min - 1;
   size_t index_end =
       index_min + 1 == trajectory_points_.size() ? index_min : index_min + 1;
@@ -94,7 +95,8 @@ PathPoint TrajectoryAnalyzer::QueryMatchedPathPoint(const double x,
                 trajectory_points_[index_end].path_point().s()) <= kEpsilon) {
     return TrajectoryPointToPathPoint(trajectory_points_[index_start]);
   }
-
+  // step3 黄金分割精搜索+插值
+  // 在[s_start, s_end]弧长区间内，用黄金分割搜索最小化距离平方函数，然后对匹配点的x,y,theta,k做线性/球面插值
   return FindMinDistancePoint(trajectory_points_[index_start],
                               trajectory_points_[index_end], x, y);
 }
@@ -151,18 +153,20 @@ void TrajectoryAnalyzer::ToTrajectoryFrame(const double x, const double y,
   *ptr_s_dot = v * cos_delta_theta / one_minus_kappa_r_d;
 }
 
+// 转换为相对时间后，二分  当前/预瞄参考点
 TrajectoryPoint TrajectoryAnalyzer::QueryNearestPointByAbsoluteTime(
     const double t) const {
   return QueryNearestPointByRelativeTime(t - header_time_);
 }
 
+// 二分搜索: 时间参考点
 TrajectoryPoint TrajectoryAnalyzer::QueryNearestPointByRelativeTime(
     const double t) const {
   auto func_comp = [](const TrajectoryPoint &point,
                       const double relative_time) {
     return point.relative_time() < relative_time;
   };
-
+  // 二分搜索: 找到第一个relative_time >= t的点
   auto it_low = std::lower_bound(trajectory_points_.begin(),
                                  trajectory_points_.end(), t, func_comp);
 
@@ -175,8 +179,9 @@ TrajectoryPoint TrajectoryAnalyzer::QueryNearestPointByRelativeTime(
   }
 
   if (FLAGS_query_forward_time_point_only) {
-    return *it_low;
+    return *it_low;     // 只取时间靠后的点
   } else {
+    // 取时间上最近的点
     auto it_lower = it_low - 1;
     if (it_low->relative_time() - t < t - it_lower->relative_time()) {
       return *it_low;
@@ -185,6 +190,7 @@ TrajectoryPoint TrajectoryAnalyzer::QueryNearestPointByRelativeTime(
   }
 }
 
+// 遍历粗搜索(无插值)  横向误差计算
 TrajectoryPoint TrajectoryAnalyzer::QueryNearestPointByPosition(
     const double x, const double y) const {
   double d_min = PointDistanceSquare(trajectory_points_.front(), x, y);
@@ -211,6 +217,7 @@ PathPoint TrajectoryAnalyzer::FindMinDistancePoint(const TrajectoryPoint &p0,
                                                    const double y) const {
   // given the fact that the discretized trajectory is dense enough,
   // we assume linear trajectory between consecutive trajectory points.
+  // 距离平方函数: 在弧长s处插值得到中间点，计算到(x,y)的距离
   auto dist_square = [&p0, &p1, &x, &y](const double s) {
     double px = common::math::lerp(p0.path_point().x(), p0.path_point().s(),
                                    p1.path_point().x(), p1.path_point().s(), s);
@@ -222,8 +229,10 @@ PathPoint TrajectoryAnalyzer::FindMinDistancePoint(const TrajectoryPoint &p0,
   };
 
   PathPoint p = p0.path_point();
+  // 黄金分割搜索，找到距离(x, y)最近的点在p0和p1之间的s值
   double s = common::math::GoldenSectionSearch(dist_square, p0.path_point().s(),
                                                p1.path_point().s());
+  // 插值计算匹配点属性
   p.set_s(s);
   p.set_x(common::math::lerp(p0.path_point().x(), p0.path_point().s(),
                              p1.path_point().x(), p1.path_point().s(), s));

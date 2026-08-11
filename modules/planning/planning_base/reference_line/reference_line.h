@@ -212,7 +212,7 @@ class ReferenceLine {
 
   double GetSpeedLimitFromS(const double s) const;
 
-  void AddSpeedLimit(double start_s, double end_s, double speed_limit);
+  void (double start_s, double end_s, double speed_limit);
 
   uint32_t GetPriority() const { return priority_; }
 

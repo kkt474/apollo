@@ -23,7 +23,7 @@
 
 namespace apollo {
 namespace common {
-
+// 巴特沃斯滤波器
 void LpfCoefficients(const double ts, const double cutoff_freq,
                      std::vector<double> *denominators,
                      std::vector<double> *numerators) {

@@ -119,15 +119,16 @@ bool LatController::LoadControlConf() {
   const double mass_front = mass_fl + mass_fr;
   const double mass_rear = mass_rl + mass_rr;
   mass_ = mass_front + mass_rear;
-
+  // 质心到前后轴的距离
   lf_ = wheelbase_ * (1.0 - mass_front / mass_);
   lr_ = wheelbase_ * (1.0 - mass_rear / mass_);
 
   // moment of inertia
+  // 转动惯量 
   iz_ = lf_ * lf_ * mass_front + lr_ * lr_ * mass_rear;
 
-  lqr_eps_ = lat_based_lqr_controller_conf_.eps();
-  lqr_max_iteration_ = lat_based_lqr_controller_conf_.max_iteration();
+  lqr_eps_ = lat_based_lqr_controller_conf_.eps(); // Riccati 方程迭代收敛阈值
+  lqr_max_iteration_ = lat_based_lqr_controller_conf_.max_iteration(); // 最大迭代次数
 
   query_relative_time_ = lat_based_lqr_controller_conf_.query_relative_time();
 
@@ -163,13 +164,16 @@ void LatController::LogInitParameters() {
 
 void LatController::InitializeFilters() {
   // Low pass filter
+  // ① 低通滤波器 — 过滤转向输出
   std::vector<double> den(3, 0.0);
   std::vector<double> num(3, 0.0);
   common::LpfCoefficients(ts_, lat_based_lqr_controller_conf_.cutoff_freq(),
                           &den, &num);
   digital_filter_.set_coefficients(den, num);
+  // ② 横向误差均值滤波器 — 过滤输入误差
   lateral_error_filter_ = common::MeanFilter(static_cast<std::uint_fast8_t>(
       lat_based_lqr_controller_conf_.mean_filter_window_size()));
+  // ③ 航向误差均值滤波器 — 过滤输入误差
   heading_error_filter_ = common::MeanFilter(static_cast<std::uint_fast8_t>(
       lat_based_lqr_controller_conf_.mean_filter_window_size()));
 }
@@ -189,23 +193,23 @@ Status LatController::Init(std::shared_ptr<DependencyInjector> injector) {
   }
   // Matrix init operations.
   const int matrix_size = basic_state_size_ + preview_window_;
-  matrix_a_ = Matrix::Zero(basic_state_size_, basic_state_size_);
-  matrix_ad_ = Matrix::Zero(basic_state_size_, basic_state_size_);
+  matrix_a_ = Matrix::Zero(basic_state_size_, basic_state_size_);  // 连续时间A矩阵
+  matrix_ad_ = Matrix::Zero(basic_state_size_, basic_state_size_); // 离散时间A矩阵
   matrix_adc_ = Matrix::Zero(matrix_size, matrix_size);
   /*
-  A matrix (Gear Drive)
+  A matrix (Gear Drive)  // 连续时间A矩阵
   [0.0, 1.0, 0.0, 0.0;
    0.0, (-(c_f + c_r) / m) / v, (c_f + c_r) / m,
    (l_r * c_r - l_f * c_f) / m / v;
    0.0, 0.0, 0.0, 1.0;
    0.0, ((lr * cr - lf * cf) / i_z) / v, (l_f * c_f - l_r * c_r) / i_z,
    (-1.0 * (l_f^2 * c_f + l_r^2 * c_r) / i_z) / v;]
-  */
+  */  // 速度无关项
   matrix_a_(0, 1) = 1.0;
   matrix_a_(1, 2) = (cf_ + cr_) / mass_;
   matrix_a_(2, 3) = 1.0;
   matrix_a_(3, 2) = (lf_ * cf_ - lr_ * cr_) / iz_;
-
+  // 速度相关项
   matrix_a_coeff_ = Matrix::Zero(matrix_size, matrix_size);
   matrix_a_coeff_(1, 1) = -(cf_ + cr_) / mass_;
   matrix_a_coeff_(1, 3) = (lr_ * cr_ - lf_ * cf_) / mass_;
@@ -218,15 +222,14 @@ Status LatController::Init(std::shared_ptr<DependencyInjector> injector) {
   matrix_b_ = Matrix::Zero(basic_state_size_, 1);
   matrix_bd_ = Matrix::Zero(basic_state_size_, 1);
   matrix_bdc_ = Matrix::Zero(matrix_size, 1);
-  matrix_b_(1, 0) = cf_ / mass_;
-  matrix_b_(3, 0) = lf_ * cf_ / iz_;
+  matrix_b_(1, 0) = cf_ / mass_;  // 转角产生横向力 → 侧向加速度
+  matrix_b_(3, 0) = lf_ * cf_ / iz_;   // 转角产生绕质心的横摆力矩
   matrix_bd_ = matrix_b_ * ts_;
 
-  matrix_state_ = Matrix::Zero(matrix_size, 1);
-  matrix_k_ = Matrix::Zero(1, matrix_size);
-  matrix_r_ = Matrix::Identity(1, 1);
-  matrix_q_ = Matrix::Zero(matrix_size, matrix_size);
-
+  matrix_state_ = Matrix::Zero(matrix_size, 1); // 状态向量  (4+n)x1
+  matrix_k_ = Matrix::Zero(1, matrix_size);     // 反馈增益K  1x(4+n)
+  matrix_r_ = Matrix::Identity(1, 1);  // 控制权重 R（标量，惩罚方向盘转角大小）1x1
+  matrix_q_ = Matrix::Zero(matrix_size, matrix_size); // 状态权重Q（对角阵）（4+n)x(4+n)
   int q_param_size = lat_based_lqr_controller_conf_.matrix_q_size();
   int reverse_q_param_size =
       lat_based_lqr_controller_conf_.reverse_matrix_q_size();
@@ -301,12 +304,18 @@ void LatController::Stop() { CloseLogFile(); }
 
 std::string LatController::Name() const { return name_; }
 
+/// @brief 
+/// @param localization // 定位
+/// @param chassis // 底盘
+/// @param planning_published_trajectory // 规划轨迹
+/// @param cmd // 输出：控制命令
+/// @return 
 Status LatController::ComputeControlCommand(
     const localization::LocalizationEstimate *localization,
     const canbus::Chassis *chassis,
     const planning::ADCTrajectory *planning_published_trajectory,
     ControlCommand *cmd) {
-  auto vehicle_state = injector_->vehicle_state();
+  auto vehicle_state = injector_->vehicle_state(); // 车辆状态(速度/档位/航向...)
   auto previous_lon_debug = injector_->Get_previous_lon_debug_info();
   auto target_tracking_trajectory = *planning_published_trajectory;
 
@@ -338,19 +347,20 @@ Status LatController::ComputeControlCommand(
       current_trajectory_timestamp_ =
           planning_published_trajectory->header().timestamp_sec();
     } else {
+      // 地图坐标系下车辆位移
       auto x_diff_map = curr_vehicle_x - init_vehicle_x_;
       auto y_diff_map = curr_vehicle_y - init_vehicle_y_;
       auto theta_diff = curr_vehicle_heading - init_vehicle_heading_;
 
       auto cos_map_veh = std::cos(init_vehicle_heading_);
       auto sin_map_veh = std::sin(init_vehicle_heading_);
-
+      // 转到初始车辆坐标系
       auto x_diff_veh = cos_map_veh * x_diff_map + sin_map_veh * y_diff_map;
       auto y_diff_veh = -sin_map_veh * x_diff_map + cos_map_veh * y_diff_map;
-
+      // 旋转角取反
       auto cos_theta_diff = std::cos(-theta_diff);
       auto sin_theta_diff = std::sin(-theta_diff);
-
+      // 平移向量
       auto tx = -(cos_theta_diff * x_diff_veh - sin_theta_diff * y_diff_veh);
       auto ty = -(sin_theta_diff * x_diff_veh + cos_theta_diff * y_diff_veh);
 
@@ -374,10 +384,11 @@ Status LatController::ComputeControlCommand(
           });
     }
   }
-
+  // TrajectoryAnalyzer 封装了轨迹查询接口（按位置查、按时间查）
   trajectory_analyzer_ =
       std::move(TrajectoryAnalyzer(&target_tracking_trajectory));
-
+  
+  // 后轴到质心坐标系变换
   // Transform the coordinate of the planning trajectory from the center of the
   // rear-axis to the center of mass, if conditions matched
   if (((lat_based_lqr_controller_conf_.trajectory_transform_to_com_reverse() &&
@@ -385,6 +396,7 @@ Status LatController::ComputeControlCommand(
        (lat_based_lqr_controller_conf_.trajectory_transform_to_com_drive() &&
         vehicle_state->gear() == canbus::Chassis::GEAR_DRIVE)) &&
       enable_look_ahead_back_control_) {
+    // 沿航向方向平移 lr（质心到后轴距离）
     trajectory_analyzer_.TrajectoryTransformToCOM(lr_);
   }
 
@@ -420,9 +432,9 @@ Status LatController::ComputeControlCommand(
     matrix_a_(0, 1) = 1.0;
     matrix_a_coeff_(0, 2) = 0.0;
   }
-  matrix_a_(1, 2) = (cf_ + cr_) / mass_;
-  matrix_a_(3, 2) = (lf_ * cf_ - lr_ * cr_) / iz_;
-  matrix_a_coeff_(1, 1) = -(cf_ + cr_) / mass_;
+  matrix_a_(1, 2) = (cf_ + cr_) / mass_;     // 侧向力/质量
+  matrix_a_(3, 2) = (lf_ * cf_ - lr_ * cr_) / iz_;   // 横摆力矩/惯量
+  matrix_a_coeff_(1, 1) = -(cf_ + cr_) / mass_;      // 1/v项分子
   matrix_a_coeff_(1, 3) = (lr_ * cr_ - lf_ * cf_) / mass_;
   matrix_a_coeff_(3, 1) = (lr_ * cr_ - lf_ * cf_) / iz_;
   matrix_a_coeff_(3, 3) = -1.0 * (lf_ * lf_ * cf_ + lr_ * lr_ * cr_) / iz_;
@@ -488,10 +500,11 @@ Status LatController::ComputeControlCommand(
   // feedback = - K * state
   // Convert vehicle steer angle from rad to degree and then to steer degree
   // then to 100% ratio
+  // 反馈项
   const double steer_angle_feedback = -(matrix_k_ * matrix_state_)(0, 0) * 180 /
                                       M_PI * steer_ratio_ /
                                       steer_single_direction_max_degree_ * 100;
-
+  // 前馈项
   const double steer_angle_feedforward = ComputeFeedForward(debug->curvature());
 
   double steer_angle = 0.0;
@@ -514,11 +527,13 @@ Status LatController::ComputeControlCommand(
       }
     }
   }
+  // 合成最终的转向控制输出 = 反馈项 + 前馈项 + 反馈增强项
   steer_angle = steer_angle_feedback + steer_angle_feedforward +
                 steer_angle_feedback_augment;
 
   // Compute the steering command limit with the given maximum lateral
   // acceleration
+  // 横向加速度下限幅
   const double steer_limit =
       FLAGS_set_steer_limit ? std::atan(max_lat_acc_ * wheelbase_ /
                                         (vehicle_state->linear_velocity() *
@@ -576,15 +591,16 @@ Status LatController::ComputeControlCommand(
   pre_steering_position_ = steering_position;
   debug->set_steer_mrac_enable_status(enable_mrac_);
 
+  // 限幅+低通滤波
   // Clamp the steer angle with steer limitations at current speed
   double steer_angle_limited =
-      common::math::Clamp(steer_angle, -steer_limit, steer_limit);
+      common::math::Clamp(steer_angle, -steer_limit, steer_limit); // 横向加速度约束
   steer_angle = steer_angle_limited;
   debug->set_steer_angle_limited(steer_angle_limited);
 
   // Limit the steering command with the designed digital filter
-  steer_angle = digital_filter_.Filter(steer_angle);
-  steer_angle = common::math::Clamp(steer_angle, -100.0, 100.0);
+  steer_angle = digital_filter_.Filter(steer_angle);  // 10Hz巴特沃斯低通
+  steer_angle = common::math::Clamp(steer_angle, -100.0, 100.0);  // 硬限幅
 
   // Check if the steer is locked and hence the previous steer angle should be
   // executed
@@ -656,11 +672,13 @@ void LatController::UpdateState(SimpleLateralDebug *debug,
                                 const canbus::Chassis *chassis) {
   auto vehicle_state = injector_->vehicle_state();
   if (FLAGS_use_navigation_mode) {
+    // 导航模式: 用(0,0)作为位置(因为轨迹已在车辆坐标系下)
     ComputeLateralErrors(
         0.0, 0.0, driving_orientation_, vehicle_state->linear_velocity(),
         vehicle_state->angular_velocity(), vehicle_state->linear_acceleration(),
         trajectory_analyzer_, debug, chassis);
   } else {
+    // 非导航模式:用质心位置
     // Transform the coordinate of the vehicle states from the center of the
     // rear-axis to the center of mass, if conditions matched
     const auto &com = vehicle_state->ComputeCOMPosition(lr_);
@@ -726,6 +744,7 @@ void LatController::UpdateMatrix() {
   matrix_a_(1, 3) = matrix_a_coeff_(1, 3) / v;
   matrix_a_(3, 1) = matrix_a_coeff_(3, 1) / v;
   matrix_a_(3, 3) = matrix_a_coeff_(3, 3) / v;
+  // 双线性变换
   Matrix matrix_i = Matrix::Identity(matrix_a_.cols(), matrix_a_.cols());
   matrix_ad_ = (matrix_i - ts_ * 0.5 * matrix_a_).inverse() *
                (matrix_i + ts_ * 0.5 * matrix_a_);
@@ -733,11 +752,13 @@ void LatController::UpdateMatrix() {
 
 void LatController::UpdateMatrixCompound() {
   // Initialize preview matrix
+  // 左上角 4×4 填入基础离散 A 矩阵
   matrix_adc_.block(0, 0, basic_state_size_, basic_state_size_) = matrix_ad_;
   matrix_bdc_.block(0, 0, basic_state_size_, 1) = matrix_bd_;
   if (preview_window_ > 0) {
     matrix_bdc_(matrix_bdc_.rows() - 1, 0) = 1;
     // Update A matrix;
+    // 预览部分：次对角线置1，形成移位寄存器结构
     for (int i = 0; i < preview_window_ - 1; ++i) {
       matrix_adc_(basic_state_size_ + i, basic_state_size_ + 1 + i) = 1;
     }
@@ -745,6 +766,7 @@ void LatController::UpdateMatrixCompound() {
 }
 
 double LatController::ComputeFeedForward(double ref_curvature) const {
+  // 质心侧偏角补偿系数
   const double kv =
       lr_ * mass_ / 2 / cf_ / wheelbase_ - lf_ * mass_ / 2 / cr_ / wheelbase_;
 
@@ -776,7 +798,7 @@ void LatController::ComputeLateralErrors(
     const TrajectoryAnalyzer &trajectory_analyzer, SimpleLateralDebug *debug,
     const canbus::Chassis *chassis) {
   TrajectoryPoint target_point;
-
+  // 按绝对时间查： t_now + query_relative_time (0.8s前推)
   if (lat_based_lqr_controller_conf_.query_time_nearest_point_only()) {
     target_point = trajectory_analyzer.QueryNearestPointByAbsoluteTime(
         Clock::NowInSeconds() + query_relative_time_);
@@ -784,9 +806,11 @@ void LatController::ComputeLateralErrors(
     if (FLAGS_use_navigation_mode &&
         !lat_based_lqr_controller_conf_
              .enable_navigation_mode_position_update()) {
+      // 绝对时间查
       target_point = trajectory_analyzer.QueryNearestPointByAbsoluteTime(
           Clock::NowInSeconds() + query_relative_time_);
     } else {
+      // 按位置查最近点
       target_point = trajectory_analyzer.QueryNearestPointByPosition(x, y);
     }
   }
@@ -803,7 +827,7 @@ void LatController::ComputeLateralErrors(
 
   const double cos_target_heading = std::cos(target_point.path_point().theta());
   const double sin_target_heading = std::sin(target_point.path_point().theta());
-
+  // 横向误差
   double lateral_error = cos_target_heading * dy - sin_target_heading * dx;
   if (lat_based_lqr_controller_conf_.enable_navigation_mode_error_filter()) {
     lateral_error = lateral_error_filter_.Update(lateral_error);
@@ -812,6 +836,7 @@ void LatController::ComputeLateralErrors(
   debug->set_lateral_error(lateral_error);
 
   debug->set_ref_heading(target_point.path_point().theta());
+  // 航向误差
   double heading_error =
       common::math::NormalizeAngle(theta - debug->ref_heading());
   if (lat_based_lqr_controller_conf_.enable_navigation_mode_error_filter()) {
@@ -837,7 +862,8 @@ void LatController::ComputeLateralErrors(
         lookback_station_low_speed_, low_speed_bound_ - low_speed_window_,
         lookback_station_high_speed_, low_speed_bound_, std::fabs(linear_v));
   }
-
+  
+  // 航向误差反馈
   // Estimate the heading error with look-ahead/look-back windows as feedback
   // signal for special driving scenarios
   double heading_error_feedback;
@@ -853,7 +879,8 @@ void LatController::ComputeLateralErrors(
         lookahead_point.path_point().theta());
   }
   debug->set_heading_error_feedback(heading_error_feedback);
-
+  
+  // 横向误差反馈
   // Estimate the lateral error with look-ahead/look-back windows as feedback
   // signal for special driving scenarios
   double lateral_error_feedback;
@@ -865,15 +892,17 @@ void LatController::ComputeLateralErrors(
         lateral_error + lookahead_station * std::sin(heading_error);
   }
   debug->set_lateral_error_feedback(lateral_error_feedback);
-
-  auto lateral_error_dot = linear_v * std::sin(heading_error);
-  auto lateral_error_dot_dot = linear_a * std::sin(heading_error);
+  
+  // 误差变化率
+  auto lateral_error_dot = linear_v * std::sin(heading_error);  // 横向误差率
+  auto lateral_error_dot_dot = linear_a * std::sin(heading_error);  // 横向加速度
   if (FLAGS_reverse_heading_control) {
     if (injector_->vehicle_state()->gear() == canbus::Chassis::GEAR_REVERSE) {
       lateral_error_dot = -lateral_error_dot;
       lateral_error_dot_dot = -lateral_error_dot_dot;
     }
   }
+  // 向心加速度
   auto centripetal_acceleration =
       linear_v * linear_v / wheelbase_ *
       std::tan(chassis->steering_percentage() / 100 *
@@ -892,6 +921,7 @@ void LatController::ComputeLateralErrors(
   }
   debug->set_ref_heading_rate(target_point.path_point().kappa() *
                               target_point.v());
+  // 航向误差率
   debug->set_heading_error_rate(debug->heading_rate() -
                                 debug->ref_heading_rate());
 
@@ -920,6 +950,7 @@ void LatController::ComputeLateralErrors(
 void LatController::UpdateDrivingOrientation() {
   auto vehicle_state = injector_->vehicle_state();
   driving_orientation_ = vehicle_state->heading();
+  // 前向欧拉离散化，离散时间步长为ts_
   matrix_bd_ = matrix_b_ * ts_;
   // Reverse the driving direction if the vehicle is in reverse mode
   if (FLAGS_reverse_heading_control) {

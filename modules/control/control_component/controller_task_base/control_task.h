@@ -123,6 +123,7 @@ bool ControlTask::LoadConfig(T *config) {
   std::string class_name =
       abi::__cxa_demangle(typeid(*this).name(), 0, 0, &status);
   // Generate the default task config path from PluginManager.
+  // calss_name: control/controller/***/ conf/controller_conf.pb.txt
   std::string config_path_ =
       apollo::cyber::plugin_manager::PluginManager::Instance()
           ->GetPluginConfPath<ControlTask>(class_name,

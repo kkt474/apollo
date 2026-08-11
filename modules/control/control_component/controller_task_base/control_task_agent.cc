@@ -36,7 +36,8 @@ Status ControlTaskAgent::Init(std::shared_ptr<DependencyInjector> injector,
     AERROR << "control_pipeline is empty";
     return Status(ErrorCode::CONTROL_INIT_ERROR, "Empty control_pipeline");
   }
-
+  // apollo::control::LatController
+  // apollo::control::LonController
   injector_ = injector;
   for (int i = 0; i < control_pipeline.controller_size(); i++) {
     auto controller = PluginManager::Instance()->CreateInstance<ControlTask>(
